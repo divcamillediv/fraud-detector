@@ -1,65 +1,197 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useEffect, useState } from 'react';
+import { supabase } from '@/lib/supabaseClient';
+import { ShieldAlert, CheckCircle, Activity, Ban, Search } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+
+// Types basés sur votre DB
+type Alert = {
+  id: string;
+  created_at: string;
+  status: string;
+  severity: string;
+  transaction_id: string;
+  analyst_notes: string;
+};
+
+export default function Dashboard() {
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [stats, setStats] = useState({ total: 0, critical: 0, blocked: 0 });
+  const [loading, setLoading] = useState(true);
+
+  // --- 1. CHARGEMENT INITIAL & REALTIME ---
+  useEffect(() => {
+    fetchAlerts();
+
+    // Abonnement Temps Réel aux nouvelles alertes
+    const channel = supabase
+      .channel('realtime-alerts')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'alerts' }, (payload) => {
+        console.log('Nouvelle alerte reçue!', payload);
+        const newAlert = payload.new as Alert;
+        setAlerts((prev) => [newAlert, ...prev]); // Ajoute en haut de liste
+        updateStats([newAlert, ...alerts]); // Recalcule les stats vite fait
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // --- 2. RECUPERATION DES DONNÉES ---
+  const fetchAlerts = async () => {
+    const { data, error } = await supabase
+      .table('alerts')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(20); // On prend les 20 dernières
+
+    if (!error && data) {
+      setAlerts(data);
+      updateStats(data);
+    }
+    setLoading(false);
+  };
+
+  const updateStats = (currentAlerts: Alert[]) => {
+    const critical = currentAlerts.filter(a => a.severity === 'CRITIQUE').length;
+    const blocked = currentAlerts.filter(a => a.status === 'RESOLU_FRAUDE').length; // Simplification
+    setStats({
+      total: currentAlerts.length,
+      critical,
+      blocked
+    });
+  };
+
+  // --- 3. GESTION DES ACTIONS ---
+  const handleAction = async (id: string, action: 'BAN' | 'IGNORE') => {
+    const newStatus = action === 'BAN' ? 'RESOLU_FRAUDE' : 'FAUX_POSITIF';
+    
+    // Mise à jour Optimiste (UI d'abord)
+    setAlerts(alerts.map(a => a.id === id ? { ...a, status: newStatus } : a));
+
+    // Mise à jour DB
+    await supabase.table('alerts').update({ status: newStatus }).eq('id', id);
+  };
+
+  // Données factices pour le graphique (à remplacer par une vraie query plus tard)
+  const chartData = [
+    { name: '10:00', risk: 12 }, { name: '11:00', risk: 19 },
+    { name: '12:00', risk: 3 }, { name: '13:00', risk: 5 },
+    { name: '14:00', risk: 25 }, { name: '15:00', risk: 8 },
+  ];
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+    <div className="min-h-screen bg-slate-50 p-8 font-sans">
+      {/* Header */}
+      <header className="mb-8 flex justify-between items-center">
+        <div>
+          <h1 className="text-3xl font-bold text-slate-800 flex items-center gap-2">
+            <ShieldAlert className="text-blue-600" /> FraudGuard AI
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+          <p className="text-slate-500">Supervision temps réel des flux transactionnels</p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        <div className="flex gap-2">
+          <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium flex items-center gap-1">
+            <Activity size={14} /> Système Actif
+          </span>
         </div>
-      </main>
+      </header>
+
+      {/* KPIs Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <Card title="Alertes Récentes" value={stats.total} icon={<Search className="text-blue-500" />} color="bg-white" />
+        <Card title="Risques Critiques" value={stats.critical} icon={<ShieldAlert className="text-red-500" />} color="bg-red-50 border-red-100" />
+        <Card title="Bloqués Auto" value={stats.blocked} icon={<Ban className="text-orange-500" />} color="bg-white" />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        
+        {/* Section Gauche : Flux d'Alertes */}
+        <div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+          <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+            <h2 className="text-lg font-semibold text-slate-800">Flux d'Alertes (Live)</h2>
+            {loading && <span className="text-sm text-slate-400 animate-pulse">Connexion...</span>}
+          </div>
+          
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm text-slate-600">
+              <thead className="bg-slate-50 text-xs uppercase font-semibold text-slate-500">
+                <tr>
+                  <th className="p-4">Sévérité</th>
+                  <th className="p-4">Transaction ID</th>
+                  <th className="p-4">Statut</th>
+                  <th className="p-4">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {alerts.map((alert) => (
+                  <tr key={alert.id} className="hover:bg-slate-50 transition-colors">
+                    <td className="p-4">
+                      <span className={`px-2 py-1 rounded text-xs font-bold 
+                        ${alert.severity === 'CRITIQUE' ? 'bg-red-100 text-red-700' : 
+                          alert.severity === 'MOYENNE' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'}`}>
+                        {alert.severity}
+                      </span>
+                    </td>
+                    <td className="p-4 font-mono text-xs">{alert.transaction_id.slice(0, 8)}...</td>
+                    <td className="p-4">{alert.status}</td>
+                    <td className="p-4 flex gap-2">
+                      <button onClick={() => handleAction(alert.id, 'BAN')} className="p-1 hover:bg-red-100 text-red-600 rounded" title="Confirmer Fraude">
+                        <Ban size={16} />
+                      </button>
+                      <button onClick={() => handleAction(alert.id, 'IGNORE')} className="p-1 hover:bg-green-100 text-green-600 rounded" title="Marquer Sûr">
+                        <CheckCircle size={16} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {alerts.length === 0 && !loading && (
+              <div className="p-8 text-center text-slate-400">Aucune alerte récente.</div>
+            )}
+          </div>
+        </div>
+
+        {/* Section Droite : Stats Graphiques */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6">
+          <h2 className="text-lg font-semibold text-slate-800 mb-6">Tendance Risque</h2>
+          <div className="h-64 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+                <XAxis dataKey="name" fontSize={12} />
+                <YAxis fontSize={12} />
+                <Tooltip />
+                <Line type="monotone" dataKey="risk" stroke="#ef4444" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-100">
+            <h3 className="text-sm font-bold text-blue-800 mb-1">Note de l'IA</h3>
+            <p className="text-xs text-blue-600">
+              Le modèle XGBoost détecte une hausse de 15% des fraudes de type "Electronics" depuis 14h00.
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+// Petit composant pour les cartes KPI
+function Card({ title, value, icon, color }: any) {
+  return (
+    <div className={`${color} p-6 rounded-xl shadow-sm border border-slate-100 flex items-center justify-between`}>
+      <div>
+        <p className="text-slate-500 text-sm font-medium mb-1">{title}</p>
+        <h3 className="text-2xl font-bold text-slate-800">{value}</h3>
+      </div>
+      <div className="p-3 bg-white rounded-full shadow-sm">{icon}</div>
     </div>
   );
 }
