@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { ShieldAlert, CheckCircle, Activity, Ban, Search } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { Settings } from 'lucide-react'; // Ajoutez l'import
+import Link from 'next/link'; // Ajoutez l'import
 
 // Types basés sur votre DB
 type Alert = {
@@ -98,7 +100,15 @@ export default function Dashboard() {
             <Activity size={14} /> Système Actif
           </span>
         </div>
+        <div className="flex gap-2 items-center">
+          {/* Lien vers les settings */}
+          <Link href="/settings" className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition-colors" title="Configuration">
+            <Settings size={20} />
+          </Link>
+        </div>
       </header>
+  
+  
 
       {/* KPIs Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -127,6 +137,7 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
+                
                 {alerts.map((alert) => (
                   <tr key={alert.id} className="hover:bg-slate-50 transition-colors">
                     <td className="p-4">
@@ -136,7 +147,11 @@ export default function Dashboard() {
                         {alert.severity}
                       </span>
                     </td>
-                    <td className="p-4 font-mono text-xs">{alert.transaction_id.slice(0, 8)}...</td>
+                    <td className="p-4 font-mono text-xs text-blue-600 hover:underline cursor-pointer">
+                      <Link href={`/alert/${alert.id}`}>
+                        {alert.transaction_id.slice(0, 8)}...
+                      </Link>
+                    </td>
                     <td className="p-4">{alert.status}</td>
                     <td className="p-4 flex gap-2">
                       <button onClick={() => handleAction(alert.id, 'BAN')} className="p-1 hover:bg-red-100 text-red-600 rounded" title="Confirmer Fraude">
