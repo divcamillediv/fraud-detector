@@ -11,6 +11,14 @@
 *.sln.docstates
 *.env
 *.env.local
+backend/.venv/
+backend/bin
+backend/include
+backend/lib
+backend/lib64
+backend/pyvenv.cfg
+backend/.env
+backend/__pycache__/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
