@@ -14,6 +14,7 @@ export default function AlertDetail() {
   const router = useRouter();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [isUpdating, setIsUpdating] = useState(false); // Nouvel état pour bloquer le bouton
 
   useEffect(() => {
     if (id) fetchAlertDetails();
@@ -38,16 +39,31 @@ export default function AlertDetail() {
   };
 
   const handleResolution = async (status: string) => {
-    // Met à jour le statut et redirige vers le dashboard
-    await supabase
-      .from('alerts')
-      .update({ 
-        status: status,
-        confirmed_fraud: status === 'RESOLU_FRAUDE' // Important pour le réapprentissage
-      })
-      .eq('id', id);
-    
-    router.push('/');
+    setIsUpdating(true); // 1. On active le chargement pour éviter le double-clic
+
+    try {
+      // 2. On attend que Supabase finisse l'écriture (IMPORTANT : await)
+      const { error } = await supabase
+        .from('alerts')
+        .update({ 
+          status: status,
+          confirmed_fraud: status === 'RESOLU_FRAUDE', // Logique métier
+          updated_at: new Date()
+        })
+        .eq('id', id);
+
+      if (error) throw error;
+
+      // 3. LA CLÉ DU SUCCÈS : On invalide le cache Next.js
+      router.refresh(); 
+
+      // 4. On retourne à l'accueil
+      router.push('/');
+      
+    } catch (e) {
+      console.error("Erreur sauvegarde:", e);
+      setIsUpdating(false); // On réactive les boutons en cas d'erreur
+    }
   };
 
   if (loading) return <div className="p-10 text-center text-slate-500">Chargement du dossier...</div>;
@@ -75,9 +91,12 @@ export default function AlertDetail() {
           </button>
           <button 
             onClick={() => handleResolution('RESOLU_FRAUDE')}
-            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 shadow-sm flex items-center gap-2 transition-all"
+            disabled={isUpdating}
+            className={`px-4 py-2 text-white rounded-lg flex items-center gap-2 transition-all shadow-sm
+              ${isUpdating ? 'bg-slate-400 cursor-wait' : 'bg-red-600 hover:bg-red-700'}`}
           >
-            <Ban size={18} /> Confirmer Fraude & Bloquer
+            <Ban size={18} /> 
+            {isUpdating ? 'Sauvegarde...' : 'Confirmer Fraude & Bloquer'}
           </button>
         </div>
       </div>

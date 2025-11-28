@@ -23,29 +23,53 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
 
   // --- 1. CHARGEMENT INITIAL & REALTIME ---
-  useEffect(() => {
-    fetchAlerts();
+  // Dans app/page.tsx
 
-    // Abonnement Temps Réel aux nouvelles alertes
-    const channel = supabase
-      .channel('realtime-alerts')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'alerts' }, (payload) => {
-        console.log('Nouvelle alerte reçue!', payload);
+useEffect(() => {
+  fetchAlerts();
+
+  const channel = supabase
+    .channel('realtime-alerts')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'alerts' }, (payload) => {
+      
+      if (payload.eventType === 'INSERT') {
         const newAlert = payload.new as Alert;
-        setAlerts((prev) => [newAlert, ...prev]); // Ajoute en haut de liste
-        updateStats([newAlert, ...alerts]); // Recalcule les stats vite fait
-      })
-      .subscribe();
+        setAlerts((prev) => {
+          const newList = [newAlert, ...prev];
+          updateStats(newList); // <--- Recalcul des stats ici
+          return newList;
+        });
+      } 
+      else if (payload.eventType === 'UPDATE') {
+        const updatedAlert = payload.new as Alert;
+        setAlerts((prev) => {
+          const newList = prev.map(alert => 
+            alert.id === updatedAlert.id ? updatedAlert : alert
+          );
+          updateStats(newList); // <--- ET recalcul des stats ici aussi !
+          return newList;
+        });
+      }
+    })
+    .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, []);
+  const onFocus = () => {
+    console.log("Retour sur le dashboard -> Refresh des données");
+    fetchAlerts();
+  };
+
+  window.addEventListener('focus', onFocus);
+
+  return () => {
+    supabase.removeChannel(channel);
+    window.removeEventListener('focus', onFocus); // Nettoyage
+  };
+}, []);
 
   // --- 2. RECUPERATION DES DONNÉES ---
   const fetchAlerts = async () => {
     const { data, error } = await supabase
-      .table('alerts')
+      .from('alerts')
       .select('*')
       .order('created_at', { ascending: false })
       .limit(20); // On prend les 20 dernières
@@ -70,14 +94,30 @@ export default function Dashboard() {
   // --- 3. GESTION DES ACTIONS ---
   const handleAction = async (id: string, action: 'BAN' | 'IGNORE') => {
     const newStatus = action === 'BAN' ? 'RESOLU_FRAUDE' : 'FAUX_POSITIF';
-    
-    // Mise à jour Optimiste (UI d'abord)
-    setAlerts(alerts.map(a => a.id === id ? { ...a, status: newStatus } : a));
 
-    // Mise à jour DB
-    await supabase.table('alerts').update({ status: newStatus }).eq('id', id);
+    // 1. On calcule la NOUVELLE liste complète d'abord
+    // On utilise 'alerts' (l'état actuel) pour créer la nouvelle version
+    const updatedList = alerts.map(a => 
+      a.id === id ? { ...a, status: newStatus } : a
+    );
+
+    // 2. On met à jour l'affichage du tableau
+    setAlerts(updatedList);
+
+    // 3. IMPORTANT : On force le recalcul des stats avec la NOUVELLE liste
+    updateStats(updatedList); 
+
+    // 4. Ensuite seulement, on envoie à la BDD (en arrière-plan)
+    await supabase
+      .from('alerts')
+      .update({ 
+        status: newStatus,
+        updated_at: new Date() 
+      })
+      .eq('id', id);
   };
 
+  
   // Données factices pour le graphique (à remplacer par une vraie query plus tard)
   const chartData = [
     { name: '10:00', risk: 12 }, { name: '11:00', risk: 19 },
