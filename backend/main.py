@@ -3,6 +3,8 @@ import json
 import hashlib
 from dotenv import load_dotenv
 from datetime import datetime
+
+load_dotenv()
 from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -14,11 +16,8 @@ import numpy as np
 
 # --- CONFIGURATION ---
 # Remplacer par vos clés Supabase (disponibles dans Project Settings > API)
-#SUPABASE_URL = os.getenv("SUPABASE_URL")
-#SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
-
-SUPABASE_URL = "https://ecnycudjtekhfgbzglqu.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVjbnljdWRqdGVraGZnYnpnbHF1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MzQ4ODQ3MSwiZXhwIjoyMDc5MDY0NDcxfQ.ojJe2KN6woZRb78QxP-0O0qoeaF-g4Q-o-7eqwBVPkU"  # Remplacez par votre clé Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI(title="Fraud Detection AI Engine")
