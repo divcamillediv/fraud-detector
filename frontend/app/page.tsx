@@ -117,6 +117,16 @@ export default function Dashboard() {
   const [analystComment, setAnalystComment] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
+  // Settings state
+  const [highThreshold, setHighThreshold] = useState(0.70);
+  const [mediumThreshold, setMediumThreshold] = useState(0.50);
+  const [minAmount, setMinAmount] = useState(100);
+  const [sensitiveCountries, setSensitiveCountries] = useState<string[]>(['RU', 'CN']);
+  const [maxAnomalies, setMaxAnomalies] = useState(3);
+  const [autoBlock, setAutoBlock] = useState(true);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [configLoaded, setConfigLoaded] = useState(false);
+
   // Chart data
   const [chartData, setChartData] = useState([
     { name: '00h', frauds: 2 },
@@ -132,6 +142,7 @@ export default function Dashboard() {
   useEffect(() => {
     fetchAlerts();
     fetchAllHistory();
+    fetchConfig();
 
     const channel = supabase
       .channel('realtime-alerts')
@@ -316,6 +327,95 @@ export default function Dashboard() {
     setShowModal(true);
   };
 
+  // Fetch config from database
+  const fetchConfig = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('rules_config')
+        .select('key, value');
+
+      if (error) {
+        console.error('Erreur chargement config:', error);
+        return;
+      }
+
+      if (data) {
+        for (const row of data) {
+          const { key, value } = row;
+          switch (key) {
+            case 'fraud_threshold_high':
+              setHighThreshold(parseFloat(value));
+              break;
+            case 'fraud_threshold_medium':
+              setMediumThreshold(parseFloat(value));
+              break;
+            case 'min_amount_alert':
+              setMinAmount(parseFloat(value));
+              break;
+            case 'sensitive_countries':
+              try {
+                setSensitiveCountries(JSON.parse(value));
+              } catch {
+                setSensitiveCountries(value.split(',').map((s: string) => s.trim()));
+              }
+              break;
+            case 'max_anomalies':
+              setMaxAnomalies(parseInt(value));
+              break;
+            case 'auto_block_active':
+              setAutoBlock(value === 'true' || value === 'True');
+              break;
+          }
+        }
+        setConfigLoaded(true);
+      }
+    } catch (err) {
+      console.error('Erreur fetchConfig:', err);
+    }
+  };
+
+  // Save config to database
+  const handleSaveConfig = async () => {
+    setSavingConfig(true);
+
+    const configItems = [
+      { key: 'fraud_threshold_high', value: highThreshold.toString() },
+      { key: 'fraud_threshold_medium', value: mediumThreshold.toString() },
+      { key: 'min_amount_alert', value: minAmount.toString() },
+      { key: 'sensitive_countries', value: JSON.stringify(sensitiveCountries) },
+      { key: 'max_anomalies', value: maxAnomalies.toString() },
+      { key: 'auto_block_active', value: autoBlock.toString() }
+    ];
+
+    try {
+      for (const item of configItems) {
+        const { error } = await supabase
+          .from('rules_config')
+          .upsert(
+            { key: item.key, value: item.value, updated_at: new Date().toISOString() },
+            { onConflict: 'key' }
+          );
+
+        if (error) {
+          console.error(`Erreur sauvegarde ${item.key}:`, error);
+        }
+      }
+    } catch (err) {
+      console.error('Erreur handleSaveConfig:', err);
+    }
+
+    setSavingConfig(false);
+  };
+
+  // Toggle country in sensitive list
+  const toggleCountry = (country: string) => {
+    if (sensitiveCountries.includes(country)) {
+      setSensitiveCountries(sensitiveCountries.filter(c => c !== country));
+    } else {
+      setSensitiveCountries([...sensitiveCountries, country]);
+    }
+  };
+
   const filteredAlerts = alerts.filter(alert => {
     const score = alert.fraud_predictions?.score || 0;
 
@@ -335,12 +435,28 @@ export default function Dashboard() {
     return true;
   });
 
-  // Donut chart data
+  // Donut chart data for alerts tab
   const riskDistribution = [
     { name: 'Élevé', value: metrics.highRisk, color: '#ef4444' },
     { name: 'Moyen', value: metrics.mediumRisk, color: '#f59e0b' },
     { name: 'Faible', value: metrics.lowRisk, color: '#22c55e' },
   ];
+
+  // Donut chart data for history tab (based on historyData)
+  const historyRiskDistribution = (() => {
+    const highRisk = historyData.filter(tx => (tx.fraud_predictions?.score || 0) >= 0.7).length;
+    const mediumRisk = historyData.filter(tx => {
+      const score = tx.fraud_predictions?.score || 0;
+      return score >= 0.4 && score < 0.7;
+    }).length;
+    const lowRisk = historyData.filter(tx => (tx.fraud_predictions?.score || 0) < 0.4).length;
+
+    return [
+      { name: 'Élevé', value: highRisk, color: '#ef4444' },
+      { name: 'Moyen', value: mediumRisk, color: '#f59e0b' },
+      { name: 'Faible', value: lowRisk, color: '#22c55e' },
+    ];
+  })();
 
   return (
     <div className="min-h-screen bg-[#0f172a]">
@@ -714,7 +830,7 @@ export default function Dashboard() {
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
                       <Pie
-                        data={riskDistribution}
+                        data={historyRiskDistribution}
                         cx="50%"
                         cy="50%"
                         innerRadius={40}
@@ -722,7 +838,7 @@ export default function Dashboard() {
                         paddingAngle={2}
                         dataKey="value"
                       >
-                        {riskDistribution.map((entry, index) => (
+                        {historyRiskDistribution.map((entry, index) => (
                           <Cell key={`cell-${index}`} fill={entry.color} />
                         ))}
                       </Pie>
@@ -917,15 +1033,237 @@ export default function Dashboard() {
         )}
 
         {activeTab === 'settings' && (
-          <div className="max-w-2xl">
-            <div className="card shadow-soft p-6">
-              <h2 className="text-lg font-semibold text-gray-200 mb-4">Paramètres de détection</h2>
-              <p className="text-sm text-gray-500 mb-6">
-                Configurez les seuils et règles du moteur de détection.
-              </p>
-              <Link href="/settings" className="btn-primary inline-block">
-                Accéder aux paramètres complets
-              </Link>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Main Settings Panel */}
+            <div className="lg:col-span-2 space-y-6">
+              {/* Detection Thresholds */}
+              <div className="card shadow-soft p-6">
+                <h2 className="text-lg font-semibold text-gray-200 mb-4">Seuils de détection</h2>
+                <p className="text-sm text-gray-500 mb-6">
+                  Configurez les seuils de score pour classifier les transactions.
+                </p>
+
+                <div className="space-y-6">
+                  {/* High Threshold */}
+                  <div>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-sm text-gray-300">Seuil critique (BLOCK)</label>
+                      <span className="text-sm font-mono text-red-400">{highThreshold.toFixed(2)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={highThreshold}
+                      onChange={(e) => setHighThreshold(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-red-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Score ≥ {highThreshold.toFixed(2)} → Transaction bloquée automatiquement
+                    </p>
+                  </div>
+
+                  {/* Medium Threshold */}
+                  <div>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-sm text-gray-300">Seuil moyen (REVIEW)</label>
+                      <span className="text-sm font-mono text-yellow-400">{mediumThreshold.toFixed(2)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={mediumThreshold}
+                      onChange={(e) => setMediumThreshold(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-yellow-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Score ≥ {mediumThreshold.toFixed(2)} → Transaction mise en révision manuelle
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Amount & Anomalies */}
+              <div className="card shadow-soft p-6">
+                <h2 className="text-lg font-semibold text-gray-200 mb-4">Règles de montant</h2>
+                <p className="text-sm text-gray-500 mb-6">
+                  Les transactions sous ce montant reçoivent un score réduit de 50%.
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-2">Montant minimum d'alerte (€)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="10"
+                      value={minAmount}
+                      onChange={(e) => setMinAmount(parseFloat(e.target.value) || 0)}
+                      className="form-control w-full"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Transactions &lt; {minAmount}€ → score × 0.5
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-2">Max anomalies avant escalade</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="10"
+                      value={maxAnomalies}
+                      onChange={(e) => setMaxAnomalies(parseInt(e.target.value) || 1)}
+                      className="form-control w-full"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Escalade après {maxAnomalies} transactions suspectes
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Sensitive Countries */}
+              <div className="card shadow-soft p-6">
+                <h2 className="text-lg font-semibold text-gray-200 mb-4">Pays sensibles</h2>
+                <p className="text-sm text-gray-500 mb-4">
+                  Les transactions provenant de ces pays reçoivent un bonus de +0.25 au score de fraude.
+                </p>
+
+                <div className="flex flex-wrap gap-2 mb-4">
+                  {['RU', 'CN', 'NG', 'BR', 'IN', 'PK', 'UA', 'BY', 'KZ', 'VN'].map((country) => (
+                    <button
+                      key={country}
+                      onClick={() => toggleCountry(country)}
+                      className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                        sensitiveCountries.includes(country)
+                          ? 'bg-red-900/50 text-red-300 border border-red-600'
+                          : 'bg-slate-800 text-gray-400 border border-slate-600 hover:border-slate-500'
+                      }`}
+                    >
+                      {country}
+                    </button>
+                  ))}
+                </div>
+
+                <p className="text-xs text-gray-500">
+                  Pays actifs : {sensitiveCountries.length > 0 ? sensitiveCountries.join(', ') : 'Aucun'}
+                </p>
+              </div>
+
+              {/* Auto Block Toggle */}
+              <div className="card shadow-soft p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-semibold text-gray-200">Blocage automatique</h2>
+                    <p className="text-sm text-gray-500 mt-1">
+                      Bloquer automatiquement les transactions dépassant le seuil critique
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setAutoBlock(!autoBlock)}
+                    className={`relative w-14 h-7 rounded-full transition-colors ${
+                      autoBlock ? 'bg-blue-600' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-1 w-5 h-5 rounded-full bg-white transition-transform ${
+                        autoBlock ? 'left-8' : 'left-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-4">
+                <button
+                  onClick={() => {
+                    setHighThreshold(0.70);
+                    setMediumThreshold(0.50);
+                    setMinAmount(100);
+                    setSensitiveCountries(['RU', 'CN']);
+                    setMaxAnomalies(3);
+                    setAutoBlock(true);
+                  }}
+                  className="px-4 py-2 text-sm border border-slate-600 text-gray-400 rounded hover:bg-slate-800 transition-colors"
+                >
+                  Réinitialiser par défaut
+                </button>
+                <button
+                  onClick={handleSaveConfig}
+                  disabled={savingConfig}
+                  className="btn-primary px-6 py-2 disabled:opacity-50"
+                >
+                  {savingConfig ? 'Sauvegarde...' : 'Enregistrer les paramètres'}
+                </button>
+              </div>
+            </div>
+
+            {/* Summary Sidebar */}
+            <div className="space-y-4">
+              <div className="card shadow-soft p-4">
+                <h3 className="text-lg font-semibold text-gray-200 mb-4">Résumé de la configuration</h3>
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center py-2 border-b border-slate-700">
+                    <span className="text-sm text-gray-400">Seuil BLOCK</span>
+                    <span className="text-sm font-mono text-red-400">≥ {highThreshold.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-2 border-b border-slate-700">
+                    <span className="text-sm text-gray-400">Seuil REVIEW</span>
+                    <span className="text-sm font-mono text-yellow-400">≥ {mediumThreshold.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-2 border-b border-slate-700">
+                    <span className="text-sm text-gray-400">Seuil ALLOW</span>
+                    <span className="text-sm font-mono text-green-400">&lt; {mediumThreshold.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-2 border-b border-slate-700">
+                    <span className="text-sm text-gray-400">Min. montant</span>
+                    <span className="text-sm font-mono text-gray-200">{minAmount}€</span>
+                  </div>
+                  <div className="flex justify-between items-center py-2 border-b border-slate-700">
+                    <span className="text-sm text-gray-400">Pays sensibles</span>
+                    <span className="text-sm font-mono text-gray-200">{sensitiveCountries.length}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-2">
+                    <span className="text-sm text-gray-400">Auto-block</span>
+                    <span className={`text-sm font-medium ${autoBlock ? 'text-green-400' : 'text-gray-500'}`}>
+                      {autoBlock ? 'Actif' : 'Inactif'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card shadow-soft p-4">
+                <h3 className="text-lg font-semibold text-gray-200 mb-4">Impact sur le scoring</h3>
+                <div className="space-y-3 text-sm">
+                  <div className="p-3 bg-slate-800/50 rounded-lg">
+                    <p className="text-gray-300 font-medium mb-1">Pays sensibles</p>
+                    <p className="text-gray-500">+0.25 fixe au score si pays = {sensitiveCountries.join(', ') || 'N/A'}</p>
+                  </div>
+                  <div className="p-3 bg-slate-800/50 rounded-lg">
+                    <p className="text-gray-300 font-medium mb-1">Petit montant</p>
+                    <p className="text-gray-500">Score × 0.5 si montant &lt; {minAmount}€</p>
+                  </div>
+                  <div className="p-3 bg-slate-800/50 rounded-lg">
+                    <p className="text-gray-300 font-medium mb-1">Catégorie Electronics</p>
+                    <p className="text-gray-500">+0.30 au score de base</p>
+                  </div>
+                  <div className="p-3 bg-slate-800/50 rounded-lg">
+                    <p className="text-gray-300 font-medium mb-1">Montant élevé</p>
+                    <p className="text-gray-500">&gt;2000€: +0.40 | &gt;8000€: +0.50</p>
+                  </div>
+                </div>
+              </div>
+
+              {configLoaded && (
+                <div className="p-3 bg-green-900/20 border border-green-800 rounded-lg">
+                  <p className="text-sm text-green-400">Configuration chargée depuis la base de données</p>
+                </div>
+              )}
             </div>
           </div>
         )}
