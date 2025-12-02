@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
-import { ShieldAlert, CheckCircle, Activity, Ban, Search, Settings, Clock, TrendingUp, Download, X } from 'lucide-react';
+import { ShieldAlert, Activity, Download, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
-import Link from 'next/link';
 
 // Types
 type Alert = {
@@ -97,7 +96,7 @@ export default function Dashboard() {
     alerts24h: 0,
     fraudRate: 0,
     inProgress: 0,
-    avgAnalysisTime: 12,
+    avgAnalysisTime: 1.44,
     highRisk: 0,
     mediumRisk: 0,
     lowRisk: 0
@@ -124,6 +123,7 @@ export default function Dashboard() {
   const [autoBlock, setAutoBlock] = useState(true);
   const [savingConfig, setSavingConfig] = useState(false);
   const [configLoaded, setConfigLoaded] = useState(false);
+  const [historyLimit, setHistoryLimit] = useState(50);
 
   // Chart data
   const [chartData, setChartData] = useState([
@@ -172,12 +172,19 @@ export default function Dashboard() {
   const fetchAllHistory = async () => {
     setLoading(true);
 
-    // Utilise la vue full_history_view qui joint transactions, fraud_predictions et alerts
-    const { data, error } = await supabase
+    // On prépare la requête de base
+    let query = supabase
       .from('full_history_view')
       .select('*')
-      .order('created_at', { ascending: false })
-      .limit(50);
+      .order('created_at', { ascending: false });
+
+    // Si historyLimit est défini (donc pas "toutes"), on applique la limite
+    // Astuce : Si vous voulez "Toutes", vous pouvez passer 10000 ou gérer un cas null
+    if (historyLimit > 0) {
+      query = query.limit(historyLimit);
+    }
+
+    const { data, error } = await query; // On exécute la requête construite
 
     if (error) {
       console.error("Erreur history", error);
@@ -226,7 +233,7 @@ export default function Dashboard() {
       alerts24h: last24h.length,
       fraudRate: parseFloat(fraudRate.toFixed(1)),
       inProgress,
-      avgAnalysisTime: 12,
+      avgAnalysisTime: metrics.avgAnalysisTime,
       highRisk,
       mediumRisk,
       lowRisk
@@ -420,10 +427,25 @@ export default function Dashboard() {
 
     // Sector filter
     if (filters.sector !== 'all') {
-      const category = alert.transactions?.merchant_info?.category?.toLowerCase() || '';
-      if (filters.sector === 'banque' && !category.includes('bank')) return false;
-      if (filters.sector === 'assurance' && !category.includes('insurance')) return false;
-      if (filters.sector === 'ecommerce' && !category.includes('electronics') && !category.includes('retail')) return false;
+      const category = (alert.transactions?.merchant_info?.category || '').toLowerCase();
+      
+      if (filters.sector === 'banque') {
+        // Mappage : Les services financiers, crypto et jeux d'argent concernent souvent la banque
+        const bankKeywords = ['gambling', 'services', 'crypto', 'bank', 'finance'];
+        if (!bankKeywords.some(kw => category.includes(kw))) return false;
+      }
+      
+      if (filters.sector === 'assurance') {
+        // Mappage : Voyages et transports concernent l'assurance
+        const insuranceKeywords = ['travel', 'transport', 'health', 'insurance'];
+        if (!insuranceKeywords.some(kw => category.includes(kw))) return false;
+      }
+      
+      if (filters.sector === 'ecommerce') {
+        // Mappage : Tous les biens de consommation
+        const ecomKeywords = ['electronics', 'jewelry', 'food', 'books', 'clothing', 'retail'];
+        if (!ecomKeywords.some(kw => category.includes(kw))) return false;
+      }
     }
 
     return true;
@@ -451,6 +473,75 @@ export default function Dashboard() {
       { name: 'Faible', value: lowRisk, color: '#22c55e' },
     ];
   })();
+
+  // Fonction générique pour convertir et télécharger en CSV
+  const exportToCSV = (data: any[], filenamePrefix: string) => {
+    if (!data || data.length === 0) {
+      alert("Aucune donnée à exporter.");
+      return;
+    }
+
+    // 1. Définition des colonnes (En-têtes)
+    const headers = [
+      "ID",
+      "Date",
+      "Utilisateur",
+      "Montant",
+      "Devise",
+      "Marchand",
+      "Catégorie",
+      "Pays (IP)",
+      "Score IA",
+      "Statut",
+      "Severité"
+    ];
+
+    // 2. Transformation des données pour le CSV
+    const csvRows = data.map(item => {
+      // Gestion de la structure différente entre 'Alert' et 'TransactionHistory'
+      // Si c'est une Alerte, la transaction est dans item.transactions
+      // Si c'est l'Historique, item EST la transaction
+      const isAlert = 'transactions' in item;
+      
+      const tx = isAlert ? item.transactions : item;
+      const pred = isAlert ? item.fraud_predictions : { score: item.score };
+      const alertInfo = isAlert ? item : { status: item.alert_status, severity: item.alert_severity };
+      
+      // Fonction utilitaire pour nettoyer les champs (échapper les guillemets)
+      const clean = (val: any) => `"${String(val || '').replace(/"/g, '""')}"`;
+
+      return [
+        clean(tx?.id),
+        clean(new Date(item.created_at).toLocaleString('fr-FR')),
+        clean(tx?.external_user_id),
+        clean(tx?.amount),
+        clean(tx?.currency || 'EUR'),
+        clean(tx?.merchant_info?.name),
+        clean(tx?.merchant_info?.category),
+        clean(tx?.ip_address ? countryFromIP(tx.ip_address) : 'N/A'),
+        clean(pred?.score?.toFixed(4) || '0'),
+        clean(alertInfo?.status || 'N/A'),
+        clean(alertInfo?.severity || 'N/A')
+      ].join(",");
+    });
+
+    // 3. Assemblage avec le BOM pour Excel (\uFEFF)
+    const csvContent = "\uFEFF" + [headers.join(","), ...csvRows].join("\n");
+
+    // 4. Création du lien de téléchargement
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const dateStr = new Date().toISOString().split('T')[0];
+    
+    link.setAttribute("href", url);
+    link.setAttribute("download", `${filenamePrefix}_${dateStr}.csv`);
+    link.style.visibility = "hidden";
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   return (
     <div className="min-h-screen bg-[#0f172a]">
@@ -681,7 +772,10 @@ export default function Dashboard() {
                 </div>
 
                 <div className="p-4 border-t border-slate-700 flex justify-end">
-                  <button className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 border border-slate-600 rounded hover:bg-slate-800 transition-colors">
+                  <button 
+                    onClick={() => exportToCSV(filteredAlerts, "export_alertes")} 
+                    className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 border border-slate-600 rounded hover:bg-slate-800 transition-colors"
+                  >
                     <Download size={16} /> Exporter les alertes
                   </button>
                 </div>
@@ -947,7 +1041,10 @@ export default function Dashboard() {
                 </div>
 
                 <div className="p-4 border-t border-slate-700 flex justify-end">
-                  <button className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 border border-slate-600 rounded hover:bg-slate-800 transition-colors">
+                  <button 
+                    onClick={() => exportToCSV(historyData, "export_historique")}
+                    className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 border border-slate-600 rounded hover:bg-slate-800 transition-colors"
+                  >
                     <Download size={16} /> Exporter les transactions
                   </button>
                 </div>
@@ -985,31 +1082,35 @@ export default function Dashboard() {
                 </div>
 
                 {/* Filters */}
-                <div className="card shadow-soft p-4">
-                  <h3 className="text-lg font-semibold text-gray-200 mb-4">Filtres</h3>
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm text-gray-400 mb-1">Limite</label>
-                      <select
-                        className="form-select w-full text-sm"
-                        defaultValue="50"
-                        onChange={(e) => {
-                          // Could add limit filter here
-                        }}
-                      >
-                        <option value="25">25 transactions</option>
-                        <option value="50">50 transactions</option>
-                        <option value="100">100 transactions</option>
-                      </select>
-                    </div>
-                    <button
-                      className="btn-primary w-full text-sm"
-                      onClick={() => fetchAllHistory()}
+                {/* Dans la Sidebar de l'onglet History */}
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1">Limite d'affichage</label>
+                    <select
+                      className="form-select w-full text-sm"
+                      value={historyLimit} // 1. On lie la valeur au State
+                      onChange={(e) => {
+                        const newVal = parseInt(e.target.value);
+                        setHistoryLimit(newVal); // 2. On met à jour le State
+                        // Optionnel : Vous pouvez recharger immédiatement si vous voulez
+                        // fetchAllHistory(); 
+                        // Mais comme vous avez un bouton "Actualiser" juste en dessous, 
+                        // l'utilisateur cliquera dessus pour valider.
+                      }}
                     >
-                      Actualiser
-                    </button>
+                      <option value="25">25 transactions</option>
+                      <option value="50">50 transactions</option>
+                      <option value="100">100 transactions</option>
+                      {/* Pour l'option "Toutes", on met une valeur très haute ou 0 si géré */}
+                      <option value="10000">Toutes (Max 10k)</option> 
+                    </select>
                   </div>
-                </div>
+                    
+                  <button
+                    className="btn-primary w-full text-sm mt-2" // Ajout d'un petit margin-top
+                    onClick={() => fetchAllHistory()} // Ce clic va maintenant utiliser la nouvelle valeur de historyLimit
+                  >
+                    Actualiser la liste
+                  </button>
               </div>
             </div>
           </>

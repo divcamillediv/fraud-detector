@@ -341,6 +341,27 @@ async def get_dashboard_metrics():
         high_risk = 0
         medium_risk = 0
         low_risk = 0
+        
+        # Récupérer les alertes résolues (Fraude confirmée ou Faux positif)
+        resolved_alerts = supabase.table("alerts")\
+            .select("created_at, updated_at")\
+            .in_("status", ["RESOLU_FRAUDE", "FAUX_POSITIF"])\
+            .not_.is_("updated_at", "null")\
+            .execute()
+
+        data = resolved_alerts.data or []
+
+        if data:
+            total_seconds = 0
+            for a in data:
+                start = datetime.fromisoformat(a['created_at'].replace('Z', '+00:00'))
+                end = datetime.fromisoformat(a['updated_at'].replace('Z', '+00:00'))
+                total_seconds += (end - start).total_seconds()
+
+            # Convertir en minutes
+            avg_minutes = int((total_seconds / len(data)) / 60)
+        else:
+            avg_minutes = 0
 
         for alert in all_alerts.data or []:
             pred = alert.get("fraud_predictions")
@@ -360,7 +381,7 @@ async def get_dashboard_metrics():
             "alerts_24h": len(alerts_24h.data) if alerts_24h.data else 0,
             "fraud_rate": round(fraud_rate, 1),
             "in_progress": len(in_progress.data) if in_progress.data else 0,
-            "avg_analysis_time": 12,  # Valeur simulée, à calculer depuis les timestamps
+            "avg_analysis_time": avg_minutes, 
             "risk_distribution": {
                 "high": high_risk,
                 "medium": medium_risk,
