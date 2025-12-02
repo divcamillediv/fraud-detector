@@ -45,6 +45,25 @@ type Filters = {
   period: string;
 };
 
+// Type for transaction history (from transactions table with joins)
+type TransactionHistory = {
+  id: string;
+  created_at: string;
+  amount: number;
+  currency: string;
+  external_user_id: string;
+  merchant_info: { name: string; category: string };
+  ip_address: string;
+  fraud_predictions?: {
+    score: number;
+  };
+  alerts?: {
+    id: string;
+    status: string;
+    severity: string;
+  }[];
+};
+
 // Country mapping for display
 const countryFromIP = (ip: string): string => {
   // Simulated - in real app, use GeoIP
@@ -94,7 +113,9 @@ export default function Dashboard() {
   });
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [showModal, setShowModal] = useState(false);
-  const [historyData, setHistoryData] = useState<Alert[]>([]);
+  const [historyData, setHistoryData] = useState<TransactionHistory[]>([]);
+  const [analystComment, setAnalystComment] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   // Chart data
   const [chartData, setChartData] = useState([
@@ -207,26 +228,91 @@ export default function Dashboard() {
     });
   };
 
-  const handleAction = async (id: string, action: 'BAN' | 'IGNORE') => {
-    const newStatus = action === 'BAN' ? 'RESOLU_FRAUDE' : 'FAUX_POSITIF';
+  const handleAction = async (id: string, action: 'BAN' | 'IGNORE' | 'IN_PROGRESS', notes?: string) => {
+    let newStatus: string;
+    switch (action) {
+      case 'BAN':
+        newStatus = 'RESOLU_FRAUDE';
+        break;
+      case 'IGNORE':
+        newStatus = 'FAUX_POSITIF';
+        break;
+      case 'IN_PROGRESS':
+        newStatus = 'EN_COURS';
+        break;
+      default:
+        newStatus = 'EN_COURS';
+    }
 
+    setIsSaving(true);
+
+    // Update local state
     const updatedList = alerts.map(a =>
-      a.id === id ? { ...a, status: newStatus } : a
+      a.id === id ? { ...a, status: newStatus, analyst_notes: notes || a.analyst_notes } : a
     );
     setAlerts(updatedList);
     updateMetrics(updatedList);
 
-    await supabase
+    // Update selected alert if it's the one being modified
+    if (selectedAlert && selectedAlert.id === id) {
+      setSelectedAlert({ ...selectedAlert, status: newStatus, analyst_notes: notes || selectedAlert.analyst_notes });
+    }
+
+    // Save to database
+    const updateData: Record<string, unknown> = {
+      status: newStatus,
+      confirmed_fraud: action === 'BAN',
+      updated_at: new Date().toISOString()
+    };
+
+    if (notes !== undefined) {
+      updateData.analyst_notes = notes;
+    }
+
+    const { error } = await supabase
+      .from('alerts')
+      .update(updateData)
+      .eq('id', id);
+
+    if (error) {
+      console.error('Erreur lors de la sauvegarde:', error);
+    }
+
+    setIsSaving(false);
+  };
+
+  const handleSaveComment = async () => {
+    if (!selectedAlert) return;
+
+    setIsSaving(true);
+
+    // Update local state
+    const updatedList = alerts.map(a =>
+      a.id === selectedAlert.id ? { ...a, analyst_notes: analystComment } : a
+    );
+    setAlerts(updatedList);
+    setSelectedAlert({ ...selectedAlert, analyst_notes: analystComment });
+
+    // Save to database
+    const { error } = await supabase
       .from('alerts')
       .update({
-        status: newStatus,
-        updated_at: new Date()
+        analyst_notes: analystComment,
+        updated_at: new Date().toISOString()
       })
-      .eq('id', id);
+      .eq('id', selectedAlert.id);
+
+    if (error) {
+      console.error('Erreur lors de la sauvegarde du commentaire:', error);
+    }
+
+    setIsSaving(false);
+    setShowModal(false);
   };
 
   const openAlertDetails = (alert: Alert) => {
     setSelectedAlert(alert);
+    setAnalystComment(alert.analyst_notes || '');
     setShowModal(true);
   };
 
@@ -269,9 +355,6 @@ export default function Dashboard() {
             <span className="px-3 py-1 bg-green-900/30 text-green-400 rounded-full text-sm font-medium flex items-center gap-1 border border-green-800">
               <Activity size={14} /> Système Actif
             </span>
-            <Link href="/settings" className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-full transition-colors" title="Configuration">
-              <Settings size={20} />
-            </Link>
           </div>
         </div>
       </nav>
@@ -579,15 +662,21 @@ export default function Dashboard() {
             {/* Metrics */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
               <div className="metric-card shadow-soft">
-                <div className="text-3xl font-bold text-gray-100">{metrics.alerts24h}</div>
-                <div className="text-sm text-gray-400">Alertes totales</div>
+                <div className="text-3xl font-bold text-gray-100">{historyData.length}</div>
+                <div className="text-sm text-gray-400">Transactions totales</div>
+              </div>
+              <div className="metric-card shadow-soft">
+                <div className="text-3xl font-bold text-gray-100">
+                  {historyData.filter(tx => tx.alerts && tx.alerts.length > 0).length}
+                </div>
+                <div className="text-sm text-gray-400">Avec alertes</div>
               </div>
               <div className="metric-card shadow-soft">
                 <div className="text-3xl font-bold text-gray-100">{metrics.fraudRate}%</div>
                 <div className="text-sm text-gray-400">Taux de fraude estimé</div>
               </div>
               <div className="metric-card shadow-soft">
-                <div className="text-3xl font-bold text-gray-100">19 min 55s</div>
+                <div className="text-3xl font-bold text-gray-100">{metrics.avgAnalysisTime} min</div>
                 <div className="text-sm text-gray-400">Temps moyen d'analyse</div>
               </div>
             </div>
@@ -664,16 +753,16 @@ export default function Dashboard() {
                   </div>
                   <div className="flex gap-2">
                     <span className="px-2 py-1 rounded text-xs font-medium risk-badge-high">
-                      {metrics.highRisk} alertes élevées
+                      {historyData.filter(tx => (tx.fraud_predictions?.score || 0) >= 0.7).length} risque élevé
                     </span>
                     <span className="px-2 py-1 rounded text-xs font-medium risk-badge-medium">
-                      {metrics.mediumRisk} alertes moyennes
+                      {historyData.filter(tx => {
+                        const score = tx.fraud_predictions?.score || 0;
+                        return score >= 0.4 && score < 0.7;
+                      }).length} risque moyen
                     </span>
                     <span className="px-2 py-1 rounded text-xs font-medium risk-badge-low">
-                      {metrics.lowRisk} alertes faibles
-                    </span>
-                    <span className="px-2 py-1 rounded text-xs font-medium risk-badge-medium">
-                      {metrics.inProgress} en cours
+                      {historyData.filter(tx => (tx.fraud_predictions?.score || 0) < 0.4).length} risque faible
                     </span>
                   </div>
                 </div>
@@ -699,24 +788,24 @@ export default function Dashboard() {
                             Chargement...
                           </td>
                         </tr>
-                      ) : filteredAlerts.length === 0 ? (
+                      ) : historyData.length === 0 ? (
                         <tr>
                           <td colSpan={8} className="p-8 text-center text-gray-500">
-                            Aucune alerte correspond aux filtres.
+                            Aucune transaction trouvée.
                           </td>
                         </tr>
                       ) : (
-                        filteredAlerts.slice(0, 10).map((alert) => {
-                          const score = alert.fraud_predictions?.score || 0;
+                        historyData.map((tx) => {
+                          const score = tx.fraud_predictions?.score || 0;
                           const risk = getRiskLevel(score);
-                          const status = getStatusBadge(alert.status);
-                          const tx = alert.transactions;
-                          const country = tx?.ip_address ? countryFromIP(tx.ip_address) : 'N/A';
+                          const alertInfo = tx.alerts && tx.alerts.length > 0 ? tx.alerts[0] : null;
+                          const status = alertInfo ? getStatusBadge(alertInfo.status) : { label: 'TRAITÉE', class: 'badge-false' };
+                          const country = tx.ip_address ? countryFromIP(tx.ip_address) : 'N/A';
 
                           return (
-                            <tr key={alert.id} className="hover:bg-slate-800/30 transition-colors">
+                            <tr key={tx.id} className="hover:bg-slate-800/30 transition-colors">
                               <td className="p-3 text-gray-300">
-                                {new Date(alert.created_at).toLocaleString('fr-FR', {
+                                {new Date(tx.created_at).toLocaleString('fr-FR', {
                                   day: '2-digit',
                                   month: '2-digit',
                                   year: 'numeric',
@@ -725,10 +814,10 @@ export default function Dashboard() {
                                 })}
                               </td>
                               <td className="p-3 text-gray-300 font-mono text-xs">
-                                {tx?.external_user_id?.slice(0, 10) || 'N/A'}
+                                {tx.external_user_id?.slice(0, 10) || 'N/A'}
                               </td>
                               <td className="p-3 text-gray-200 font-medium">
-                                {tx?.amount?.toLocaleString('fr-FR', { style: 'currency', currency: tx?.currency || 'EUR' }) || 'N/A'}
+                                {tx.amount?.toLocaleString('fr-FR', { style: 'currency', currency: tx.currency || 'EUR' }) || 'N/A'}
                               </td>
                               <td className="p-3 text-gray-300">{country}</td>
                               <td className="p-3 text-gray-300">{score.toFixed(2)}</td>
@@ -741,12 +830,14 @@ export default function Dashboard() {
                                 </span>
                               </td>
                               <td className="p-3">
-                                <button
-                                  onClick={() => openAlertDetails(alert)}
-                                  className="btn-outline-primary text-xs px-3 py-1"
-                                >
-                                  Voir détails
-                                </button>
+                                {alertInfo && (
+                                  <Link
+                                    href={`/alert/${alertInfo.id}`}
+                                    className="btn-outline-primary text-xs px-3 py-1"
+                                  >
+                                    Voir alerte
+                                  </Link>
+                                )}
                               </td>
                             </tr>
                           );
@@ -758,7 +849,7 @@ export default function Dashboard() {
 
                 <div className="p-4 border-t border-slate-700 flex justify-end">
                   <button className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 border border-slate-600 rounded hover:bg-slate-800 transition-colors">
-                    <Download size={16} /> Exporter les alertes
+                    <Download size={16} /> Exporter les transactions
                   </button>
                 </div>
               </div>
@@ -767,74 +858,56 @@ export default function Dashboard() {
               <div className="space-y-4">
                 {/* Summary */}
                 <div className="card shadow-soft p-4">
-                  <h3 className="text-lg font-semibold text-gray-200 mb-4">Vue synthétique</h3>
+                  <h3 className="text-lg font-semibold text-gray-200 mb-4">Statistiques</h3>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <div className="text-xs text-gray-500">Alertes (24h)</div>
-                      <div className="text-xl font-semibold text-gray-200">{metrics.alerts24h}</div>
+                      <div className="text-xs text-gray-500">Transactions</div>
+                      <div className="text-xl font-semibold text-gray-200">{historyData.length}</div>
                     </div>
                     <div>
-                      <div className="text-xs text-gray-500">Taux de fraude</div>
-                      <div className="text-xl font-semibold text-gray-200">{metrics.fraudRate} %</div>
+                      <div className="text-xs text-gray-500">Avec alertes</div>
+                      <div className="text-xl font-semibold text-gray-200">
+                        {historyData.filter(tx => tx.alerts && tx.alerts.length > 0).length}
+                      </div>
                     </div>
                     <div>
-                      <div className="text-xs text-gray-500">En cours</div>
-                      <div className="text-xl font-semibold text-gray-200">{metrics.inProgress}</div>
+                      <div className="text-xs text-gray-500">Risque élevé</div>
+                      <div className="text-xl font-semibold text-red-400">
+                        {historyData.filter(tx => (tx.fraud_predictions?.score || 0) >= 0.7).length}
+                      </div>
                     </div>
                     <div>
-                      <div className="text-xs text-gray-500">Temps moyen</div>
-                      <div className="text-xl font-semibold text-gray-200">{metrics.avgAnalysisTime} min</div>
+                      <div className="text-xs text-gray-500">Risque faible</div>
+                      <div className="text-xl font-semibold text-green-400">
+                        {historyData.filter(tx => (tx.fraud_predictions?.score || 0) < 0.4).length}
+                      </div>
                     </div>
                   </div>
                 </div>
 
                 {/* Filters */}
                 <div className="card shadow-soft p-4">
-                  <h3 className="text-lg font-semibold text-gray-200 mb-4">Filtres rapides</h3>
+                  <h3 className="text-lg font-semibold text-gray-200 mb-4">Filtres</h3>
                   <div className="space-y-4">
                     <div>
-                      <label className="block text-sm text-gray-400 mb-1">Niveau de risque</label>
+                      <label className="block text-sm text-gray-400 mb-1">Limite</label>
                       <select
                         className="form-select w-full text-sm"
-                        value={filters.riskLevel}
-                        onChange={(e) => setFilters({ ...filters, riskLevel: e.target.value })}
+                        defaultValue="50"
+                        onChange={(e) => {
+                          // Could add limit filter here
+                        }}
                       >
-                        <option value="all">Tous</option>
-                        <option value="high">Élevé uniquement</option>
-                        <option value="medium_high">Moyen et élevé</option>
-                        <option value="low">Faible uniquement</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm text-gray-400 mb-1">Secteur</label>
-                      <select
-                        className="form-select w-full text-sm"
-                        value={filters.sector}
-                        onChange={(e) => setFilters({ ...filters, sector: e.target.value })}
-                      >
-                        <option value="all">Tous</option>
-                        <option value="banque">Banque</option>
-                        <option value="assurance">Assurance</option>
-                        <option value="ecommerce">E-commerce</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm text-gray-400 mb-1">Période</label>
-                      <select
-                        className="form-select w-full text-sm"
-                        value={filters.period}
-                        onChange={(e) => setFilters({ ...filters, period: e.target.value })}
-                      >
-                        <option value="24h">Dernières 24h</option>
-                        <option value="7d">7 derniers jours</option>
-                        <option value="30d">30 derniers jours</option>
+                        <option value="25">25 transactions</option>
+                        <option value="50">50 transactions</option>
+                        <option value="100">100 transactions</option>
                       </select>
                     </div>
                     <button
                       className="btn-primary w-full text-sm"
-                      onClick={() => fetchAlerts()}
+                      onClick={() => fetchAllHistory()}
                     >
-                      Appliquer les filtres
+                      Actualiser
                     </button>
                   </div>
                 </div>
@@ -935,27 +1008,34 @@ export default function Dashboard() {
                 <p className="text-sm text-gray-500 mb-2">Qualifier l'alerte</p>
                 <div className="flex flex-wrap gap-2">
                   <button
-                    onClick={() => {
-                      handleAction(selectedAlert.id, 'BAN');
+                    onClick={async () => {
+                      await handleAction(selectedAlert.id, 'BAN', analystComment);
                       setShowModal(false);
                     }}
-                    className="px-4 py-2 text-sm border border-red-600 text-red-400 rounded hover:bg-red-900/30 transition-colors"
+                    disabled={isSaving}
+                    className="px-4 py-2 text-sm border border-red-600 text-red-400 rounded hover:bg-red-900/30 transition-colors disabled:opacity-50"
                   >
-                    Fraude confirmée
+                    {isSaving ? 'Sauvegarde...' : 'Fraude confirmée'}
                   </button>
                   <button
-                    onClick={() => {
-                      handleAction(selectedAlert.id, 'IGNORE');
+                    onClick={async () => {
+                      await handleAction(selectedAlert.id, 'IGNORE', analystComment);
                       setShowModal(false);
                     }}
-                    className="px-4 py-2 text-sm border border-slate-600 text-gray-400 rounded hover:bg-slate-800 transition-colors"
+                    disabled={isSaving}
+                    className="px-4 py-2 text-sm border border-slate-600 text-gray-400 rounded hover:bg-slate-800 transition-colors disabled:opacity-50"
                   >
-                    Fausse alerte
+                    {isSaving ? 'Sauvegarde...' : 'Fausse alerte'}
                   </button>
                   <button
-                    className="px-4 py-2 text-sm border border-yellow-600 text-yellow-400 rounded hover:bg-yellow-900/30 transition-colors"
+                    onClick={async () => {
+                      await handleAction(selectedAlert.id, 'IN_PROGRESS', analystComment);
+                      setShowModal(false);
+                    }}
+                    disabled={isSaving}
+                    className="px-4 py-2 text-sm border border-yellow-600 text-yellow-400 rounded hover:bg-yellow-900/30 transition-colors disabled:opacity-50"
                   >
-                    En cours d'analyse
+                    {isSaving ? 'Sauvegarde...' : 'En cours d\'analyse'}
                   </button>
                 </div>
               </div>
@@ -965,6 +1045,8 @@ export default function Dashboard() {
                 <textarea
                   className="form-control w-full h-24 text-sm"
                   placeholder="Ajouter une note (ex : contacter le client, vérifier la localisation...)"
+                  value={analystComment}
+                  onChange={(e) => setAnalystComment(e.target.value)}
                 />
               </div>
             </div>
@@ -980,8 +1062,12 @@ export default function Dashboard() {
                 >
                   Fermer
                 </button>
-                <button className="btn-primary text-sm">
-                  Enregistrer
+                <button
+                  onClick={handleSaveComment}
+                  disabled={isSaving}
+                  className="btn-primary text-sm disabled:opacity-50"
+                >
+                  {isSaving ? 'Sauvegarde...' : 'Enregistrer'}
                 </button>
               </div>
             </div>
