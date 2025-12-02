@@ -45,7 +45,7 @@ type Filters = {
   period: string;
 };
 
-// Type for transaction history (from transactions table with joins)
+// Type for transaction history (from full_history_view - flattened structure)
 type TransactionHistory = {
   id: string;
   created_at: string;
@@ -54,14 +54,12 @@ type TransactionHistory = {
   external_user_id: string;
   merchant_info: { name: string; category: string };
   ip_address: string;
-  fraud_predictions?: {
-    score: number;
-  };
-  alerts?: {
-    id: string;
-    status: string;
-    severity: string;
-  }[];
+  // Flattened from fraud_predictions
+  score: number | null;
+  // Flattened from alerts
+  alert_id: string | null;
+  alert_status: string | null;
+  alert_severity: string | null;
 };
 
 // Country mapping for display
@@ -172,26 +170,22 @@ export default function Dashboard() {
   }, []);
 
   const fetchAllHistory = async () => {
-  setLoading(true);
-  
-  // On part des transactions pour tout avoir (même ce qui n'est pas une alerte)
-  const { data, error } = await supabase
-    .from('transactions')
-    .select(`
-      *,
-      fraud_predictions (score),
-      alerts (id, status, severity)
-    `)
-    .order('created_at', { ascending: false })
-    .limit(50); // Limite pour la performance
+    setLoading(true);
 
-  if (error) {
-    console.error("Erreur history", error);
-  } else {
-    setHistoryData(data); // Utilisez un state dédié ou le même que filteredAlerts
-  }
-  setLoading(false);
-};
+    // Utilise la vue full_history_view qui joint transactions, fraud_predictions et alerts
+    const { data, error } = await supabase
+      .from('full_history_view')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (error) {
+      console.error("Erreur history", error);
+    } else {
+      setHistoryData(data || []);
+    }
+    setLoading(false);
+  };
 
   const fetchAlerts = async () => {
     const { data, error } = await supabase
@@ -442,14 +436,14 @@ export default function Dashboard() {
     { name: 'Faible', value: metrics.lowRisk, color: '#22c55e' },
   ];
 
-  // Donut chart data for history tab (based on historyData)
+  // Donut chart data for history tab (based on historyData - flattened view)
   const historyRiskDistribution = (() => {
-    const highRisk = historyData.filter(tx => (tx.fraud_predictions?.score || 0) >= 0.7).length;
+    const highRisk = historyData.filter(tx => (tx.score || 0) >= 0.7).length;
     const mediumRisk = historyData.filter(tx => {
-      const score = tx.fraud_predictions?.score || 0;
+      const score = tx.score || 0;
       return score >= 0.4 && score < 0.7;
     }).length;
-    const lowRisk = historyData.filter(tx => (tx.fraud_predictions?.score || 0) < 0.4).length;
+    const lowRisk = historyData.filter(tx => (tx.score || 0) < 0.4).length;
 
     return [
       { name: 'Élevé', value: highRisk, color: '#ef4444' },
@@ -783,7 +777,7 @@ export default function Dashboard() {
               </div>
               <div className="metric-card shadow-soft">
                 <div className="text-3xl font-bold text-gray-100">
-                  {historyData.filter(tx => tx.alerts && tx.alerts.length > 0).length}
+                  {historyData.filter(tx => tx.alert_id).length}
                 </div>
                 <div className="text-sm text-gray-400">Avec alertes</div>
               </div>
@@ -869,16 +863,16 @@ export default function Dashboard() {
                   </div>
                   <div className="flex gap-2">
                     <span className="px-2 py-1 rounded text-xs font-medium risk-badge-high">
-                      {historyData.filter(tx => (tx.fraud_predictions?.score || 0) >= 0.7).length} risque élevé
+                      {historyData.filter(tx => (tx.score || 0) >= 0.7).length} risque élevé
                     </span>
                     <span className="px-2 py-1 rounded text-xs font-medium risk-badge-medium">
                       {historyData.filter(tx => {
-                        const score = tx.fraud_predictions?.score || 0;
+                        const score = tx.score || 0;
                         return score >= 0.4 && score < 0.7;
                       }).length} risque moyen
                     </span>
                     <span className="px-2 py-1 rounded text-xs font-medium risk-badge-low">
-                      {historyData.filter(tx => (tx.fraud_predictions?.score || 0) < 0.4).length} risque faible
+                      {historyData.filter(tx => (tx.score || 0) < 0.4).length} risque faible
                     </span>
                   </div>
                 </div>
@@ -912,10 +906,9 @@ export default function Dashboard() {
                         </tr>
                       ) : (
                         historyData.map((tx) => {
-                          const score = tx.fraud_predictions?.score || 0;
+                          const score = tx.score || 0;
                           const risk = getRiskLevel(score);
-                          const alertInfo = tx.alerts && tx.alerts.length > 0 ? tx.alerts[0] : null;
-                          const status = alertInfo ? getStatusBadge(alertInfo.status) : { label: 'TRAITÉE', class: 'badge-false' };
+                          const status = tx.alert_status ? getStatusBadge(tx.alert_status) : { label: 'TRAITÉE', class: 'badge-false' };
                           const country = tx.ip_address ? countryFromIP(tx.ip_address) : 'N/A';
 
                           return (
@@ -945,16 +938,6 @@ export default function Dashboard() {
                                   {status.label}
                                 </span>
                               </td>
-                              <td className="p-3">
-                                {alertInfo && (
-                                  <Link
-                                    href={`/alert/${alertInfo.id}`}
-                                    className="btn-outline-primary text-xs px-3 py-1"
-                                  >
-                                    Voir alerte
-                                  </Link>
-                                )}
-                              </td>
                             </tr>
                           );
                         })
@@ -983,19 +966,19 @@ export default function Dashboard() {
                     <div>
                       <div className="text-xs text-gray-500">Avec alertes</div>
                       <div className="text-xl font-semibold text-gray-200">
-                        {historyData.filter(tx => tx.alerts && tx.alerts.length > 0).length}
+                        {historyData.filter(tx => tx.alert_id).length}
                       </div>
                     </div>
                     <div>
                       <div className="text-xs text-gray-500">Risque élevé</div>
                       <div className="text-xl font-semibold text-red-400">
-                        {historyData.filter(tx => (tx.fraud_predictions?.score || 0) >= 0.7).length}
+                        {historyData.filter(tx => (tx.score || 0) >= 0.7).length}
                       </div>
                     </div>
                     <div>
                       <div className="text-xs text-gray-500">Risque faible</div>
                       <div className="text-xl font-semibold text-green-400">
-                        {historyData.filter(tx => (tx.fraud_predictions?.score || 0) < 0.4).length}
+                        {historyData.filter(tx => (tx.score || 0) < 0.4).length}
                       </div>
                     </div>
                   </div>
