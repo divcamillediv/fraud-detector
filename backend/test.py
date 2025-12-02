@@ -6,10 +6,10 @@ API_URL = "http://127.0.0.1:8000/analyze"
 
 # Scénario : Achat massif d'électronique (déclencheur typique pour l'IA simulée)
 transaction_suspecte = {
-    "user_id": "hacker_russe_007",
-    "amount": 9500.00,             # Montant très élevé (> seuil critique)
+    "user_id": "skibidi_rizz",
+    "amount": 500.00,             # Montant très élevé (> seuil critique)
     "currency": "EUR",
-    "ip_address": "45.12.19.99",
+    "ip_address": "46.121.191.99",
     "merchant": "Apple Store",
     "category": "Electronics",      # Catégorie à risque
     "device_id": "unknown_device_x"
