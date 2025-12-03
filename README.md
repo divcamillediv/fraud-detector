@@ -17,21 +17,29 @@ Un utilisateur doit:
 
 La partie Front End utilise node et npm. 
 
-`npm install`
+```bash
+npm install
+```
 
 ### Back End
 
 Le partie Back End utilise python et pip.
 
-`pip install -r requirements.txt`
+```bash
+pip install -r requirements.txt
+```
 
 
 ## Exécuter le projet
 
 ### Front End
 
-`npm run dev`
+```bash
+npm run dev
+```
 
 ### Back End
 
-`uvicorn main:app --reload`
+```bash
+uvicorn main:app --reload
+```
