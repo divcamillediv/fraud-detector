@@ -848,12 +848,6 @@ export default function Dashboard() {
                         <option value="30d">30 derniers jours</option>
                       </select>
                     </div>
-                    <button
-                      className="btn-primary w-full text-sm"
-                      onClick={() => fetchAlerts()}
-                    >
-                      Appliquer les filtres
-                    </button>
                   </div>
                 </div>
               </div>
@@ -1087,16 +1081,13 @@ export default function Dashboard() {
                     <label className="block text-sm text-gray-400 mb-1">Limite d'affichage</label>
                     <select
                       className="form-select w-full text-sm"
-                      value={historyLimit} // 1. On lie la valeur au State
+                      value={historyLimit} 
                       onChange={(e) => {
                         const newVal = parseInt(e.target.value);
-                        setHistoryLimit(newVal); // 2. On met à jour le State
-                        // Optionnel : Vous pouvez recharger immédiatement si vous voulez
-                        // fetchAllHistory(); 
-                        // Mais comme vous avez un bouton "Actualiser" juste en dessous, 
-                        // l'utilisateur cliquera dessus pour valider.
+                        setHistoryLimit(newVal); 
                       }}
                     >
+                      <option value="10">10 transactions</option>
                       <option value="25">25 transactions</option>
                       <option value="50">50 transactions</option>
                       <option value="100">100 transactions</option>
