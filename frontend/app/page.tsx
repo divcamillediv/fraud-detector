@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
-import { ShieldAlert, CheckCircle, Activity, Ban, Search, Settings, Clock, TrendingUp, Download, X } from 'lucide-react';
+import { ShieldAlert, Activity, Download, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
-import Link from 'next/link';
 
 // Types
 type Alert = {
@@ -45,6 +44,23 @@ type Filters = {
   period: string;
 };
 
+// Type for transaction history (from full_history_view - flattened structure)
+type TransactionHistory = {
+  transaction_id: string;
+  created_at: string;
+  amount: number;
+  currency: string;
+  external_user_id: string;
+  merchant_info: { name: string; category: string };
+  ip_address: string;
+  // Flattened from fraud_predictions
+  score: number | null;
+  // Flattened from alerts
+  alert_id: string | null;
+  alert_status: string | null;
+  alert_severity: string | null;
+};
+
 // Country mapping for display
 const countryFromIP = (ip: string): string => {
   // Simulated - in real app, use GeoIP
@@ -80,7 +96,7 @@ export default function Dashboard() {
     alerts24h: 0,
     fraudRate: 0,
     inProgress: 0,
-    avgAnalysisTime: 12,
+    avgAnalysisTime: 1.44,
     highRisk: 0,
     mediumRisk: 0,
     lowRisk: 0
@@ -94,7 +110,20 @@ export default function Dashboard() {
   });
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [showModal, setShowModal] = useState(false);
-  const [historyData, setHistoryData] = useState<Alert[]>([]);
+  const [historyData, setHistoryData] = useState<TransactionHistory[]>([]);
+  const [analystComment, setAnalystComment] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Settings state
+  const [highThreshold, setHighThreshold] = useState(0.70);
+  const [mediumThreshold, setMediumThreshold] = useState(0.50);
+  const [minAmount, setMinAmount] = useState(100);
+  const [sensitiveCountries, setSensitiveCountries] = useState<string[]>(['RU', 'CN']);
+  const [maxAnomalies, setMaxAnomalies] = useState(3);
+  const [autoBlock, setAutoBlock] = useState(true);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [configLoaded, setConfigLoaded] = useState(false);
+  const [historyLimit, setHistoryLimit] = useState(50);
 
   // Chart data
   const [chartData, setChartData] = useState([
@@ -111,6 +140,7 @@ export default function Dashboard() {
   useEffect(() => {
     fetchAlerts();
     fetchAllHistory();
+    fetchConfig();
 
     const channel = supabase
       .channel('realtime-alerts')
@@ -140,26 +170,29 @@ export default function Dashboard() {
   }, []);
 
   const fetchAllHistory = async () => {
-  setLoading(true);
-  
-  // On part des transactions pour tout avoir (même ce qui n'est pas une alerte)
-  const { data, error } = await supabase
-    .from('transactions')
-    .select(`
-      *,
-      fraud_predictions (score),
-      alerts (id, status, severity)
-    `)
-    .order('created_at', { ascending: false })
-    .limit(50); // Limite pour la performance
+    setLoading(true);
 
-  if (error) {
-    console.error("Erreur history", error);
-  } else {
-    setHistoryData(data); // Utilisez un state dédié ou le même que filteredAlerts
-  }
-  setLoading(false);
-};
+    // On prépare la requête de base
+    let query = supabase
+      .from('full_history_view')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    // Si historyLimit est défini (donc pas "toutes"), on applique la limite
+    // Astuce : Si vous voulez "Toutes", vous pouvez passer 10000 ou gérer un cas null
+    if (historyLimit > 0) {
+      query = query.limit(historyLimit);
+    }
+
+    const { data, error } = await query; // On exécute la requête construite
+
+    if (error) {
+      console.error("Erreur history", error);
+    } else {
+      setHistoryData(data || []);
+    }
+    setLoading(false);
+  };
 
   const fetchAlerts = async () => {
     const { data, error } = await supabase
@@ -200,34 +233,188 @@ export default function Dashboard() {
       alerts24h: last24h.length,
       fraudRate: parseFloat(fraudRate.toFixed(1)),
       inProgress,
-      avgAnalysisTime: 12,
+      avgAnalysisTime: metrics.avgAnalysisTime,
       highRisk,
       mediumRisk,
       lowRisk
     });
   };
 
-  const handleAction = async (id: string, action: 'BAN' | 'IGNORE') => {
-    const newStatus = action === 'BAN' ? 'RESOLU_FRAUDE' : 'FAUX_POSITIF';
+  const handleAction = async (id: string, action: 'BAN' | 'IGNORE' | 'IN_PROGRESS', notes?: string) => {
+    let newStatus: string;
+    switch (action) {
+      case 'BAN':
+        newStatus = 'RESOLU_FRAUDE';
+        break;
+      case 'IGNORE':
+        newStatus = 'FAUX_POSITIF';
+        break;
+      case 'IN_PROGRESS':
+        newStatus = 'EN_COURS';
+        break;
+      default:
+        newStatus = 'EN_COURS';
+    }
 
+    setIsSaving(true);
+
+    // Update local state
     const updatedList = alerts.map(a =>
-      a.id === id ? { ...a, status: newStatus } : a
+      a.id === id ? { ...a, status: newStatus, analyst_notes: notes || a.analyst_notes } : a
     );
     setAlerts(updatedList);
     updateMetrics(updatedList);
 
-    await supabase
+    // Update selected alert if it's the one being modified
+    if (selectedAlert && selectedAlert.id === id) {
+      setSelectedAlert({ ...selectedAlert, status: newStatus, analyst_notes: notes || selectedAlert.analyst_notes });
+    }
+
+    // Save to database
+    const updateData: Record<string, unknown> = {
+      status: newStatus,
+      confirmed_fraud: action === 'BAN',
+      updated_at: new Date().toISOString()
+    };
+
+    if (notes !== undefined) {
+      updateData.analyst_notes = notes;
+    }
+
+    const { error } = await supabase
+      .from('alerts')
+      .update(updateData)
+      .eq('id', id);
+
+    if (error) {
+      console.error('Erreur lors de la sauvegarde:', error);
+    }
+
+    setIsSaving(false);
+  };
+
+  const handleSaveComment = async () => {
+    if (!selectedAlert) return;
+
+    setIsSaving(true);
+
+    // Update local state
+    const updatedList = alerts.map(a =>
+      a.id === selectedAlert.id ? { ...a, analyst_notes: analystComment } : a
+    );
+    setAlerts(updatedList);
+    setSelectedAlert({ ...selectedAlert, analyst_notes: analystComment });
+
+    // Save to database
+    const { error } = await supabase
       .from('alerts')
       .update({
-        status: newStatus,
-        updated_at: new Date()
+        analyst_notes: analystComment,
+        updated_at: new Date().toISOString()
       })
-      .eq('id', id);
+      .eq('id', selectedAlert.id);
+
+    if (error) {
+      console.error('Erreur lors de la sauvegarde du commentaire:', error);
+    }
+
+    setIsSaving(false);
+    setShowModal(false);
   };
 
   const openAlertDetails = (alert: Alert) => {
     setSelectedAlert(alert);
+    setAnalystComment(alert.analyst_notes || '');
     setShowModal(true);
+  };
+
+  // Fetch config from database
+  const fetchConfig = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('rules_config')
+        .select('key, value');
+
+      if (error) {
+        console.error('Erreur chargement config:', error);
+        return;
+      }
+
+      if (data) {
+        for (const row of data) {
+          const { key, value } = row;
+          switch (key) {
+            case 'fraud_threshold_high':
+              setHighThreshold(parseFloat(value));
+              break;
+            case 'fraud_threshold_medium':
+              setMediumThreshold(parseFloat(value));
+              break;
+            case 'min_amount_alert':
+              setMinAmount(parseFloat(value));
+              break;
+            case 'sensitive_countries':
+              try {
+                setSensitiveCountries(JSON.parse(value));
+              } catch {
+                setSensitiveCountries(value.split(',').map((s: string) => s.trim()));
+              }
+              break;
+            case 'max_anomalies':
+              setMaxAnomalies(parseInt(value));
+              break;
+            case 'auto_block_active':
+              setAutoBlock(value === 'true' || value === 'True');
+              break;
+          }
+        }
+        setConfigLoaded(true);
+      }
+    } catch (err) {
+      console.error('Erreur fetchConfig:', err);
+    }
+  };
+
+  // Save config to database
+  const handleSaveConfig = async () => {
+    setSavingConfig(true);
+
+    const configItems = [
+      { key: 'fraud_threshold_high', value: highThreshold.toString() },
+      { key: 'fraud_threshold_medium', value: mediumThreshold.toString() },
+      { key: 'min_amount_alert', value: minAmount.toString() },
+      { key: 'sensitive_countries', value: JSON.stringify(sensitiveCountries) },
+      { key: 'max_anomalies', value: maxAnomalies.toString() },
+      { key: 'auto_block_active', value: autoBlock.toString() }
+    ];
+
+    try {
+      for (const item of configItems) {
+        const { error } = await supabase
+          .from('rules_config')
+          .upsert(
+            { key: item.key, value: item.value, updated_at: new Date().toISOString() },
+            { onConflict: 'key' }
+          );
+
+        if (error) {
+          console.error(`Erreur sauvegarde ${item.key}:`, error);
+        }
+      }
+    } catch (err) {
+      console.error('Erreur handleSaveConfig:', err);
+    }
+
+    setSavingConfig(false);
+  };
+
+  // Toggle country in sensitive list
+  const toggleCountry = (country: string) => {
+    if (sensitiveCountries.includes(country)) {
+      setSensitiveCountries(sensitiveCountries.filter(c => c !== country));
+    } else {
+      setSensitiveCountries([...sensitiveCountries, country]);
+    }
   };
 
   const filteredAlerts = alerts.filter(alert => {
@@ -240,21 +427,121 @@ export default function Dashboard() {
 
     // Sector filter
     if (filters.sector !== 'all') {
-      const category = alert.transactions?.merchant_info?.category?.toLowerCase() || '';
-      if (filters.sector === 'banque' && !category.includes('bank')) return false;
-      if (filters.sector === 'assurance' && !category.includes('insurance')) return false;
-      if (filters.sector === 'ecommerce' && !category.includes('electronics') && !category.includes('retail')) return false;
+      const category = (alert.transactions?.merchant_info?.category || '').toLowerCase();
+      
+      if (filters.sector === 'banque') {
+        // Mappage : Les services financiers, crypto et jeux d'argent concernent souvent la banque
+        const bankKeywords = ['gambling', 'services', 'crypto', 'bank', 'finance'];
+        if (!bankKeywords.some(kw => category.includes(kw))) return false;
+      }
+      
+      if (filters.sector === 'assurance') {
+        // Mappage : Voyages et transports concernent l'assurance
+        const insuranceKeywords = ['travel', 'transport', 'health', 'insurance'];
+        if (!insuranceKeywords.some(kw => category.includes(kw))) return false;
+      }
+      
+      if (filters.sector === 'ecommerce') {
+        // Mappage : Tous les biens de consommation
+        const ecomKeywords = ['electronics', 'jewelry', 'food', 'books', 'clothing', 'retail'];
+        if (!ecomKeywords.some(kw => category.includes(kw))) return false;
+      }
     }
 
     return true;
   });
 
-  // Donut chart data
+  // Donut chart data for alerts tab
   const riskDistribution = [
     { name: 'Élevé', value: metrics.highRisk, color: '#ef4444' },
     { name: 'Moyen', value: metrics.mediumRisk, color: '#f59e0b' },
     { name: 'Faible', value: metrics.lowRisk, color: '#22c55e' },
   ];
+
+  // Donut chart data for history tab (based on historyData - flattened view)
+  const historyRiskDistribution = (() => {
+    const highRisk = historyData.filter(tx => (tx.score || 0) >= 0.7).length;
+    const mediumRisk = historyData.filter(tx => {
+      const score = tx.score || 0;
+      return score >= 0.4 && score < 0.7;
+    }).length;
+    const lowRisk = historyData.filter(tx => (tx.score || 0) < 0.4).length;
+
+    return [
+      { name: 'Élevé', value: highRisk, color: '#ef4444' },
+      { name: 'Moyen', value: mediumRisk, color: '#f59e0b' },
+      { name: 'Faible', value: lowRisk, color: '#22c55e' },
+    ];
+  })();
+
+  // Fonction générique pour convertir et télécharger en CSV
+  const exportToCSV = (data: any[], filenamePrefix: string) => {
+    if (!data || data.length === 0) {
+      alert("Aucune donnée à exporter.");
+      return;
+    }
+
+    // 1. Définition des colonnes (En-têtes)
+    const headers = [
+      "ID",
+      "Date",
+      "Utilisateur",
+      "Montant",
+      "Devise",
+      "Marchand",
+      "Catégorie",
+      "Pays (IP)",
+      "Score IA",
+      "Statut",
+      "Severité"
+    ];
+
+    // 2. Transformation des données pour le CSV
+    const csvRows = data.map(item => {
+      // Gestion de la structure différente entre 'Alert' et 'TransactionHistory'
+      // Si c'est une Alerte, la transaction est dans item.transactions
+      // Si c'est l'Historique, item EST la transaction
+      const isAlert = 'transactions' in item;
+      
+      const tx = isAlert ? item.transactions : item;
+      const pred = isAlert ? item.fraud_predictions : { score: item.score };
+      const alertInfo = isAlert ? item : { status: item.alert_status, severity: item.alert_severity };
+      
+      // Fonction utilitaire pour nettoyer les champs (échapper les guillemets)
+      const clean = (val: any) => `"${String(val || '').replace(/"/g, '""')}"`;
+
+      return [
+        clean(tx?.transaction_id),
+        clean(new Date(item.created_at).toLocaleString('fr-FR')),
+        clean(tx?.external_user_id),
+        clean(tx?.amount),
+        clean(tx?.currency || 'EUR'),
+        clean(tx?.merchant_info?.name),
+        clean(tx?.merchant_info?.category),
+        clean(tx?.ip_address ? countryFromIP(tx.ip_address) : 'N/A'),
+        clean(pred?.score?.toFixed(4) || '0'),
+        clean(alertInfo?.status || 'N/A'),
+        clean(alertInfo?.severity || 'N/A')
+      ].join(",");
+    });
+
+    // 3. Assemblage avec le BOM pour Excel (\uFEFF)
+    const csvContent = "\uFEFF" + [headers.join(","), ...csvRows].join("\n");
+
+    // 4. Création du lien de téléchargement
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const dateStr = new Date().toISOString().split('T')[0];
+    
+    link.setAttribute("href", url);
+    link.setAttribute("download", `${filenamePrefix}_${dateStr}.csv`);
+    link.style.visibility = "hidden";
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   return (
     <div className="min-h-screen bg-[#0f172a]">
@@ -269,9 +556,6 @@ export default function Dashboard() {
             <span className="px-3 py-1 bg-green-900/30 text-green-400 rounded-full text-sm font-medium flex items-center gap-1 border border-green-800">
               <Activity size={14} /> Système Actif
             </span>
-            <Link href="/settings" className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-full transition-colors" title="Configuration">
-              <Settings size={20} />
-            </Link>
           </div>
         </div>
       </nav>
@@ -488,7 +772,10 @@ export default function Dashboard() {
                 </div>
 
                 <div className="p-4 border-t border-slate-700 flex justify-end">
-                  <button className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 border border-slate-600 rounded hover:bg-slate-800 transition-colors">
+                  <button 
+                    onClick={() => exportToCSV(filteredAlerts, "export_alertes")} 
+                    className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 border border-slate-600 rounded hover:bg-slate-800 transition-colors"
+                  >
                     <Download size={16} /> Exporter les alertes
                   </button>
                 </div>
@@ -579,15 +866,21 @@ export default function Dashboard() {
             {/* Metrics */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
               <div className="metric-card shadow-soft">
-                <div className="text-3xl font-bold text-gray-100">{metrics.alerts24h}</div>
-                <div className="text-sm text-gray-400">Alertes totales</div>
+                <div className="text-3xl font-bold text-gray-100">{historyData.length}</div>
+                <div className="text-sm text-gray-400">Transactions totales</div>
+              </div>
+              <div className="metric-card shadow-soft">
+                <div className="text-3xl font-bold text-gray-100">
+                  {historyData.filter(tx => tx.alert_id).length}
+                </div>
+                <div className="text-sm text-gray-400">Avec alertes</div>
               </div>
               <div className="metric-card shadow-soft">
                 <div className="text-3xl font-bold text-gray-100">{metrics.fraudRate}%</div>
                 <div className="text-sm text-gray-400">Taux de fraude estimé</div>
               </div>
               <div className="metric-card shadow-soft">
-                <div className="text-3xl font-bold text-gray-100">19 min 55s</div>
+                <div className="text-3xl font-bold text-gray-100">{metrics.avgAnalysisTime} min</div>
                 <div className="text-sm text-gray-400">Temps moyen d'analyse</div>
               </div>
             </div>
@@ -625,7 +918,7 @@ export default function Dashboard() {
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
                       <Pie
-                        data={riskDistribution}
+                        data={historyRiskDistribution}
                         cx="50%"
                         cy="50%"
                         innerRadius={40}
@@ -633,7 +926,7 @@ export default function Dashboard() {
                         paddingAngle={2}
                         dataKey="value"
                       >
-                        {riskDistribution.map((entry, index) => (
+                        {historyRiskDistribution.map((entry, index) => (
                           <Cell key={`cell-${index}`} fill={entry.color} />
                         ))}
                       </Pie>
@@ -664,16 +957,16 @@ export default function Dashboard() {
                   </div>
                   <div className="flex gap-2">
                     <span className="px-2 py-1 rounded text-xs font-medium risk-badge-high">
-                      {metrics.highRisk} alertes élevées
+                      {historyData.filter(tx => (tx.score || 0) >= 0.7).length} risque élevé
                     </span>
                     <span className="px-2 py-1 rounded text-xs font-medium risk-badge-medium">
-                      {metrics.mediumRisk} alertes moyennes
+                      {historyData.filter(tx => {
+                        const score = tx.score || 0;
+                        return score >= 0.4 && score < 0.7;
+                      }).length} risque moyen
                     </span>
                     <span className="px-2 py-1 rounded text-xs font-medium risk-badge-low">
-                      {metrics.lowRisk} alertes faibles
-                    </span>
-                    <span className="px-2 py-1 rounded text-xs font-medium risk-badge-medium">
-                      {metrics.inProgress} en cours
+                      {historyData.filter(tx => (tx.score || 0) < 0.4).length} risque faible
                     </span>
                   </div>
                 </div>
@@ -699,24 +992,23 @@ export default function Dashboard() {
                             Chargement...
                           </td>
                         </tr>
-                      ) : filteredAlerts.length === 0 ? (
+                      ) : historyData.length === 0 ? (
                         <tr>
                           <td colSpan={8} className="p-8 text-center text-gray-500">
-                            Aucune alerte correspond aux filtres.
+                            Aucune transaction trouvée.
                           </td>
                         </tr>
                       ) : (
-                        filteredAlerts.slice(0, 10).map((alert) => {
-                          const score = alert.fraud_predictions?.score || 0;
+                        historyData.map((tx) => {
+                          const score = tx.score || 0;
                           const risk = getRiskLevel(score);
-                          const status = getStatusBadge(alert.status);
-                          const tx = alert.transactions;
-                          const country = tx?.ip_address ? countryFromIP(tx.ip_address) : 'N/A';
+                          const status = tx.alert_status ? getStatusBadge(tx.alert_status) : { label: 'TRAITÉE', class: 'badge-false' };
+                          const country = tx.ip_address ? countryFromIP(tx.ip_address) : 'N/A';
 
                           return (
-                            <tr key={alert.id} className="hover:bg-slate-800/30 transition-colors">
+                            <tr key={tx.transaction_id} className="hover:bg-slate-800/30 transition-colors">
                               <td className="p-3 text-gray-300">
-                                {new Date(alert.created_at).toLocaleString('fr-FR', {
+                                {new Date(tx.created_at).toLocaleString('fr-FR', {
                                   day: '2-digit',
                                   month: '2-digit',
                                   year: 'numeric',
@@ -725,10 +1017,10 @@ export default function Dashboard() {
                                 })}
                               </td>
                               <td className="p-3 text-gray-300 font-mono text-xs">
-                                {tx?.external_user_id?.slice(0, 10) || 'N/A'}
+                                {tx.external_user_id?.slice(0, 10) || 'N/A'}
                               </td>
                               <td className="p-3 text-gray-200 font-medium">
-                                {tx?.amount?.toLocaleString('fr-FR', { style: 'currency', currency: tx?.currency || 'EUR' }) || 'N/A'}
+                                {tx.amount?.toLocaleString('fr-FR', { style: 'currency', currency: tx.currency || 'EUR' }) || 'N/A'}
                               </td>
                               <td className="p-3 text-gray-300">{country}</td>
                               <td className="p-3 text-gray-300">{score.toFixed(2)}</td>
@@ -740,14 +1032,6 @@ export default function Dashboard() {
                                   {status.label}
                                 </span>
                               </td>
-                              <td className="p-3">
-                                <button
-                                  onClick={() => openAlertDetails(alert)}
-                                  className="btn-outline-primary text-xs px-3 py-1"
-                                >
-                                  Voir détails
-                                </button>
-                              </td>
                             </tr>
                           );
                         })
@@ -757,8 +1041,11 @@ export default function Dashboard() {
                 </div>
 
                 <div className="p-4 border-t border-slate-700 flex justify-end">
-                  <button className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 border border-slate-600 rounded hover:bg-slate-800 transition-colors">
-                    <Download size={16} /> Exporter les alertes
+                  <button 
+                    onClick={() => exportToCSV(historyData, "export_historique")}
+                    className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 border border-slate-600 rounded hover:bg-slate-800 transition-colors"
+                  >
+                    <Download size={16} /> Exporter les transactions
                   </button>
                 </div>
               </div>
@@ -767,92 +1054,300 @@ export default function Dashboard() {
               <div className="space-y-4">
                 {/* Summary */}
                 <div className="card shadow-soft p-4">
-                  <h3 className="text-lg font-semibold text-gray-200 mb-4">Vue synthétique</h3>
+                  <h3 className="text-lg font-semibold text-gray-200 mb-4">Statistiques</h3>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <div className="text-xs text-gray-500">Alertes (24h)</div>
-                      <div className="text-xl font-semibold text-gray-200">{metrics.alerts24h}</div>
+                      <div className="text-xs text-gray-500">Transactions</div>
+                      <div className="text-xl font-semibold text-gray-200">{historyData.length}</div>
                     </div>
                     <div>
-                      <div className="text-xs text-gray-500">Taux de fraude</div>
-                      <div className="text-xl font-semibold text-gray-200">{metrics.fraudRate} %</div>
+                      <div className="text-xs text-gray-500">Avec alertes</div>
+                      <div className="text-xl font-semibold text-gray-200">
+                        {historyData.filter(tx => tx.alert_id).length}
+                      </div>
                     </div>
                     <div>
-                      <div className="text-xs text-gray-500">En cours</div>
-                      <div className="text-xl font-semibold text-gray-200">{metrics.inProgress}</div>
+                      <div className="text-xs text-gray-500">Risque élevé</div>
+                      <div className="text-xl font-semibold text-red-400">
+                        {historyData.filter(tx => (tx.score || 0) >= 0.7).length}
+                      </div>
                     </div>
                     <div>
-                      <div className="text-xs text-gray-500">Temps moyen</div>
-                      <div className="text-xl font-semibold text-gray-200">{metrics.avgAnalysisTime} min</div>
+                      <div className="text-xs text-gray-500">Risque faible</div>
+                      <div className="text-xl font-semibold text-green-400">
+                        {historyData.filter(tx => (tx.score || 0) < 0.4).length}
+                      </div>
                     </div>
                   </div>
                 </div>
 
                 {/* Filters */}
-                <div className="card shadow-soft p-4">
-                  <h3 className="text-lg font-semibold text-gray-200 mb-4">Filtres rapides</h3>
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm text-gray-400 mb-1">Niveau de risque</label>
-                      <select
-                        className="form-select w-full text-sm"
-                        value={filters.riskLevel}
-                        onChange={(e) => setFilters({ ...filters, riskLevel: e.target.value })}
-                      >
-                        <option value="all">Tous</option>
-                        <option value="high">Élevé uniquement</option>
-                        <option value="medium_high">Moyen et élevé</option>
-                        <option value="low">Faible uniquement</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm text-gray-400 mb-1">Secteur</label>
-                      <select
-                        className="form-select w-full text-sm"
-                        value={filters.sector}
-                        onChange={(e) => setFilters({ ...filters, sector: e.target.value })}
-                      >
-                        <option value="all">Tous</option>
-                        <option value="banque">Banque</option>
-                        <option value="assurance">Assurance</option>
-                        <option value="ecommerce">E-commerce</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm text-gray-400 mb-1">Période</label>
-                      <select
-                        className="form-select w-full text-sm"
-                        value={filters.period}
-                        onChange={(e) => setFilters({ ...filters, period: e.target.value })}
-                      >
-                        <option value="24h">Dernières 24h</option>
-                        <option value="7d">7 derniers jours</option>
-                        <option value="30d">30 derniers jours</option>
-                      </select>
-                    </div>
-                    <button
-                      className="btn-primary w-full text-sm"
-                      onClick={() => fetchAlerts()}
+                {/* Dans la Sidebar de l'onglet History */}
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1">Limite d'affichage</label>
+                    <select
+                      className="form-select w-full text-sm"
+                      value={historyLimit} // 1. On lie la valeur au State
+                      onChange={(e) => {
+                        const newVal = parseInt(e.target.value);
+                        setHistoryLimit(newVal); // 2. On met à jour le State
+                        // Optionnel : Vous pouvez recharger immédiatement si vous voulez
+                        // fetchAllHistory(); 
+                        // Mais comme vous avez un bouton "Actualiser" juste en dessous, 
+                        // l'utilisateur cliquera dessus pour valider.
+                      }}
                     >
-                      Appliquer les filtres
-                    </button>
+                      <option value="25">25 transactions</option>
+                      <option value="50">50 transactions</option>
+                      <option value="100">100 transactions</option>
+                      {/* Pour l'option "Toutes", on met une valeur très haute ou 0 si géré */}
+                      <option value="10000">Toutes (Max 10k)</option> 
+                    </select>
                   </div>
-                </div>
+                    
+                  <button
+                    className="btn-primary w-full text-sm mt-2" // Ajout d'un petit margin-top
+                    onClick={() => fetchAllHistory()} // Ce clic va maintenant utiliser la nouvelle valeur de historyLimit
+                  >
+                    Actualiser la liste
+                  </button>
               </div>
             </div>
           </>
         )}
 
         {activeTab === 'settings' && (
-          <div className="max-w-2xl">
-            <div className="card shadow-soft p-6">
-              <h2 className="text-lg font-semibold text-gray-200 mb-4">Paramètres de détection</h2>
-              <p className="text-sm text-gray-500 mb-6">
-                Configurez les seuils et règles du moteur de détection.
-              </p>
-              <Link href="/settings" className="btn-primary inline-block">
-                Accéder aux paramètres complets
-              </Link>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Main Settings Panel */}
+            <div className="lg:col-span-2 space-y-6">
+              {/* Detection Thresholds */}
+              <div className="card shadow-soft p-6">
+                <h2 className="text-lg font-semibold text-gray-200 mb-4">Seuils de détection</h2>
+                <p className="text-sm text-gray-500 mb-6">
+                  Configurez les seuils de score pour classifier les transactions.
+                </p>
+
+                <div className="space-y-6">
+                  {/* High Threshold */}
+                  <div>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-sm text-gray-300">Seuil critique (BLOCK)</label>
+                      <span className="text-sm font-mono text-red-400">{highThreshold.toFixed(2)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={highThreshold}
+                      onChange={(e) => setHighThreshold(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-red-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Score ≥ {highThreshold.toFixed(2)} → Transaction bloquée automatiquement
+                    </p>
+                  </div>
+
+                  {/* Medium Threshold */}
+                  <div>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-sm text-gray-300">Seuil moyen (REVIEW)</label>
+                      <span className="text-sm font-mono text-yellow-400">{mediumThreshold.toFixed(2)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={mediumThreshold}
+                      onChange={(e) => setMediumThreshold(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-yellow-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Score ≥ {mediumThreshold.toFixed(2)} → Transaction mise en révision manuelle
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Amount & Anomalies */}
+              <div className="card shadow-soft p-6">
+                <h2 className="text-lg font-semibold text-gray-200 mb-4">Règles de montant</h2>
+                <p className="text-sm text-gray-500 mb-6">
+                  Les transactions sous ce montant reçoivent un score réduit de 50%.
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-2">Montant minimum d'alerte (€)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="10"
+                      value={minAmount}
+                      onChange={(e) => setMinAmount(parseFloat(e.target.value) || 0)}
+                      className="form-control w-full"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Transactions &lt; {minAmount}€ → score × 0.5
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-2">Max anomalies avant escalade</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="10"
+                      value={maxAnomalies}
+                      onChange={(e) => setMaxAnomalies(parseInt(e.target.value) || 1)}
+                      className="form-control w-full"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Escalade après {maxAnomalies} transactions suspectes
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Sensitive Countries */}
+              <div className="card shadow-soft p-6">
+                <h2 className="text-lg font-semibold text-gray-200 mb-4">Pays sensibles</h2>
+                <p className="text-sm text-gray-500 mb-4">
+                  Les transactions provenant de ces pays reçoivent un bonus de +0.25 au score de fraude.
+                </p>
+
+                <div className="flex flex-wrap gap-2 mb-4">
+                  {['RU', 'CN', 'NG', 'BR', 'IN', 'PK', 'UA', 'BY', 'KZ', 'VN'].map((country) => (
+                    <button
+                      key={country}
+                      onClick={() => toggleCountry(country)}
+                      className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                        sensitiveCountries.includes(country)
+                          ? 'bg-red-900/50 text-red-300 border border-red-600'
+                          : 'bg-slate-800 text-gray-400 border border-slate-600 hover:border-slate-500'
+                      }`}
+                    >
+                      {country}
+                    </button>
+                  ))}
+                </div>
+
+                <p className="text-xs text-gray-500">
+                  Pays actifs : {sensitiveCountries.length > 0 ? sensitiveCountries.join(', ') : 'Aucun'}
+                </p>
+              </div>
+
+              {/* Auto Block Toggle */}
+              <div className="card shadow-soft p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-semibold text-gray-200">Blocage automatique</h2>
+                    <p className="text-sm text-gray-500 mt-1">
+                      Bloquer automatiquement les transactions dépassant le seuil critique
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setAutoBlock(!autoBlock)}
+                    className={`relative w-14 h-7 rounded-full transition-colors ${
+                      autoBlock ? 'bg-blue-600' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-1 w-5 h-5 rounded-full bg-white transition-transform ${
+                        autoBlock ? 'left-8' : 'left-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-4">
+                <button
+                  onClick={() => {
+                    setHighThreshold(0.70);
+                    setMediumThreshold(0.50);
+                    setMinAmount(100);
+                    setSensitiveCountries(['RU', 'CN']);
+                    setMaxAnomalies(3);
+                    setAutoBlock(true);
+                  }}
+                  className="px-4 py-2 text-sm border border-slate-600 text-gray-400 rounded hover:bg-slate-800 transition-colors"
+                >
+                  Réinitialiser par défaut
+                </button>
+                <button
+                  onClick={handleSaveConfig}
+                  disabled={savingConfig}
+                  className="btn-primary px-6 py-2 disabled:opacity-50"
+                >
+                  {savingConfig ? 'Sauvegarde...' : 'Enregistrer les paramètres'}
+                </button>
+              </div>
+            </div>
+
+            {/* Summary Sidebar */}
+            <div className="space-y-4">
+              <div className="card shadow-soft p-4">
+                <h3 className="text-lg font-semibold text-gray-200 mb-4">Résumé de la configuration</h3>
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center py-2 border-b border-slate-700">
+                    <span className="text-sm text-gray-400">Seuil BLOCK</span>
+                    <span className="text-sm font-mono text-red-400">≥ {highThreshold.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-2 border-b border-slate-700">
+                    <span className="text-sm text-gray-400">Seuil REVIEW</span>
+                    <span className="text-sm font-mono text-yellow-400">≥ {mediumThreshold.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-2 border-b border-slate-700">
+                    <span className="text-sm text-gray-400">Seuil ALLOW</span>
+                    <span className="text-sm font-mono text-green-400">&lt; {mediumThreshold.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-2 border-b border-slate-700">
+                    <span className="text-sm text-gray-400">Min. montant</span>
+                    <span className="text-sm font-mono text-gray-200">{minAmount}€</span>
+                  </div>
+                  <div className="flex justify-between items-center py-2 border-b border-slate-700">
+                    <span className="text-sm text-gray-400">Pays sensibles</span>
+                    <span className="text-sm font-mono text-gray-200">{sensitiveCountries.length}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-2">
+                    <span className="text-sm text-gray-400">Auto-block</span>
+                    <span className={`text-sm font-medium ${autoBlock ? 'text-green-400' : 'text-gray-500'}`}>
+                      {autoBlock ? 'Actif' : 'Inactif'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card shadow-soft p-4">
+                <h3 className="text-lg font-semibold text-gray-200 mb-4">Impact sur le scoring</h3>
+                <div className="space-y-3 text-sm">
+                  <div className="p-3 bg-slate-800/50 rounded-lg">
+                    <p className="text-gray-300 font-medium mb-1">Pays sensibles</p>
+                    <p className="text-gray-500">+0.25 fixe au score si pays = {sensitiveCountries.join(', ') || 'N/A'}</p>
+                  </div>
+                  <div className="p-3 bg-slate-800/50 rounded-lg">
+                    <p className="text-gray-300 font-medium mb-1">Petit montant</p>
+                    <p className="text-gray-500">Score × 0.5 si montant &lt; {minAmount}€</p>
+                  </div>
+                  <div className="p-3 bg-slate-800/50 rounded-lg">
+                    <p className="text-gray-300 font-medium mb-1">Catégorie Electronics</p>
+                    <p className="text-gray-500">+0.30 au score de base</p>
+                  </div>
+                  <div className="p-3 bg-slate-800/50 rounded-lg">
+                    <p className="text-gray-300 font-medium mb-1">Montant élevé</p>
+                    <p className="text-gray-500">&gt;2000€: +0.40 | &gt;8000€: +0.50</p>
+                  </div>
+                </div>
+              </div>
+
+              {configLoaded && (
+                <div className="p-3 bg-green-900/20 border border-green-800 rounded-lg">
+                  <p className="text-sm text-green-400">Configuration chargée depuis la base de données</p>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -935,27 +1430,34 @@ export default function Dashboard() {
                 <p className="text-sm text-gray-500 mb-2">Qualifier l'alerte</p>
                 <div className="flex flex-wrap gap-2">
                   <button
-                    onClick={() => {
-                      handleAction(selectedAlert.id, 'BAN');
+                    onClick={async () => {
+                      await handleAction(selectedAlert.id, 'BAN', analystComment);
                       setShowModal(false);
                     }}
-                    className="px-4 py-2 text-sm border border-red-600 text-red-400 rounded hover:bg-red-900/30 transition-colors"
+                    disabled={isSaving}
+                    className="px-4 py-2 text-sm border border-red-600 text-red-400 rounded hover:bg-red-900/30 transition-colors disabled:opacity-50"
                   >
-                    Fraude confirmée
+                    {isSaving ? 'Sauvegarde...' : 'Fraude confirmée'}
                   </button>
                   <button
-                    onClick={() => {
-                      handleAction(selectedAlert.id, 'IGNORE');
+                    onClick={async () => {
+                      await handleAction(selectedAlert.id, 'IGNORE', analystComment);
                       setShowModal(false);
                     }}
-                    className="px-4 py-2 text-sm border border-slate-600 text-gray-400 rounded hover:bg-slate-800 transition-colors"
+                    disabled={isSaving}
+                    className="px-4 py-2 text-sm border border-slate-600 text-gray-400 rounded hover:bg-slate-800 transition-colors disabled:opacity-50"
                   >
-                    Fausse alerte
+                    {isSaving ? 'Sauvegarde...' : 'Fausse alerte'}
                   </button>
                   <button
-                    className="px-4 py-2 text-sm border border-yellow-600 text-yellow-400 rounded hover:bg-yellow-900/30 transition-colors"
+                    onClick={async () => {
+                      await handleAction(selectedAlert.id, 'IN_PROGRESS', analystComment);
+                      setShowModal(false);
+                    }}
+                    disabled={isSaving}
+                    className="px-4 py-2 text-sm border border-yellow-600 text-yellow-400 rounded hover:bg-yellow-900/30 transition-colors disabled:opacity-50"
                   >
-                    En cours d'analyse
+                    {isSaving ? 'Sauvegarde...' : 'En cours d\'analyse'}
                   </button>
                 </div>
               </div>
@@ -965,6 +1467,8 @@ export default function Dashboard() {
                 <textarea
                   className="form-control w-full h-24 text-sm"
                   placeholder="Ajouter une note (ex : contacter le client, vérifier la localisation...)"
+                  value={analystComment}
+                  onChange={(e) => setAnalystComment(e.target.value)}
                 />
               </div>
             </div>
@@ -980,8 +1484,12 @@ export default function Dashboard() {
                 >
                   Fermer
                 </button>
-                <button className="btn-primary text-sm">
-                  Enregistrer
+                <button
+                  onClick={handleSaveComment}
+                  disabled={isSaving}
+                  className="btn-primary text-sm disabled:opacity-50"
+                >
+                  {isSaving ? 'Sauvegarde...' : 'Enregistrer'}
                 </button>
               </div>
             </div>

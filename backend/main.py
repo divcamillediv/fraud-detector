@@ -45,20 +45,119 @@ class TransactionInput(BaseModel):
 # --- SIMULATEUR XGBOOST (Pour le prototype) ---
 # Dans la réalité, on chargerait : model = xgb.Booster(model_file='fraud_model.json')
 class MockXGBoost:
-    def predict(self, amount, category):
-        # Logique simple pour simuler l'IA : 
-        # Si montant > 2000 ou catégorie 'Electronics', le risque augmente
-        base_score = 0.02
-        if amount > 2000: base_score += 0.4
-        if category == "Electronics": base_score += 0.3
-        if amount > 8000: base_score += 0.5 # Fraude quasi sûre
-        
+    # Catégories à haut risque
+    HIGH_RISK_CATEGORIES = ['Electronics', 'Jewelry', 'Gambling']
+    # Catégories à risque moyen
+    MEDIUM_RISK_CATEGORIES = ['Travel', 'Services', 'Crypto']
+
+    def predict(self, amount, category, country=None, config=None):
+        """
+        Calcule le score de fraude en utilisant la configuration.
+
+        Args:
+            amount: Montant de la transaction
+            category: Catégorie du marchand
+            country: Code pays extrait de l'IP (optionnel)
+            config: Configuration depuis la base de données (optionnel)
+
+        Returns:
+            Score de fraude entre 0 et 1
+        """
+        config = config or {}
+        sensitive_countries = config.get('sensitive_countries', ['RU', 'CN'])
+        min_amount = config.get('min_amount_alert', 100)
+
+        base_score = 0.05
+
+        # Règle 1: Montant - échelle progressive
+        if amount > 8000:
+            base_score += 0.45
+        elif amount > 5000:
+            base_score += 0.35
+        elif amount > 2000:
+            base_score += 0.30
+        elif amount > 1000:
+            base_score += 0.20
+        elif amount > 500:
+            base_score += 0.10
+
+        # Règle 2: Catégorie à risque (case-insensitive)
+        category_upper = (category or '').strip()
+        if category_upper in self.HIGH_RISK_CATEGORIES:
+            base_score += 0.30
+        elif category_upper in self.MEDIUM_RISK_CATEGORIES:
+            base_score += 0.20
+
+        # Règle 3: Pays sensible (+0.25 fixe selon config)
+        if country and country in sensitive_countries:
+            base_score += 0.25
+
+        # Règle 4: Petit montant = réduction du score
+        if amount < min_amount:
+            base_score *= 0.5
+
         # Ajout d'un peu d'aléatoire (bruit)
         noise = np.random.normal(0, 0.05)
-        final_score = min(max(base_score + noise, 0), 1) # Clamp entre 0 et 1
+        final_score = min(max(base_score + noise, 0), 1)  # Clamp entre 0 et 1
         return float(final_score)
 
 model = MockXGBoost()
+
+
+def get_country_from_ip(ip: str) -> str:
+    """
+    Extrait le code pays depuis une adresse IP (simulation).
+    Dans un cas réel, utiliser un service GeoIP.
+    """
+    if not ip:
+        return "FR"
+    try:
+        hash_val = sum(int(x) for x in ip.split('.') if x.isdigit())
+        countries = ['FR', 'US', 'RU', 'CN', 'BR', 'DE', 'GB']
+        return countries[hash_val % len(countries)]
+    except:
+        return "FR"
+
+
+def get_full_config() -> Dict[str, Any]:
+    """
+    Récupère toute la configuration ML depuis la base de données.
+    Utilisée par le modèle XGBoost pour ajuster ses calculs.
+    """
+    config = {
+        'fraud_threshold_critical': 0.70,
+        'fraud_threshold_medium': 0.50,
+        'sensitive_countries': ['RU', 'CN'],
+        'min_amount_alert': 100,
+        'max_anomalies': 3,
+        'auto_block_active': True
+    }
+
+    try:
+        res = supabase.table("rules_config").select("key, value").execute()
+        for row in res.data or []:
+            key = row.get('key')
+            value = row.get('value')
+
+            if key == 'fraud_threshold_high':
+                config['fraud_threshold_critical'] = float(value)
+            elif key == 'fraud_threshold_medium':
+                config['fraud_threshold_medium'] = float(value)
+            elif key == 'sensitive_countries':
+                try:
+                    config['sensitive_countries'] = json.loads(value)
+                except:
+                    pass
+            elif key == 'min_amount_alert':
+                config['min_amount_alert'] = float(value)
+            elif key == 'max_anomalies':
+                config['max_anomalies'] = int(value)
+            elif key == 'auto_block_active':
+                config['auto_block_active'] = value in [True, 'true', 'True']
+    except Exception as e:
+        print(f"Erreur chargement config: {e}")
+
+    return config
 
 # --- FONCTIONS UTILITAIRES ---
 
@@ -138,33 +237,49 @@ async def analyze_transaction(tx: TransactionInput, background_tasks: Background
             "transaction_id": transaction_id
         }
 
-    # 3. Inférence IA (Machine Learning)
-    # Préparation des features pour le modèle
-    fraud_score = model.predict(tx.amount, tx.category)
-    
+    # 3. Récupération de la configuration complète
+    config = get_full_config()
+
+    # 4. Extraction du pays depuis l'IP
+    country = get_country_from_ip(tx.ip_address)
+
+    # 5. Inférence IA (Machine Learning) avec configuration
+    fraud_score = model.predict(
+        amount=tx.amount,
+        category=tx.category,
+        country=country,
+        config=config
+    )
+
     # Sauvegarde de la prédiction
     pred_payload = {
         "transaction_id": transaction_id,
         "score": fraud_score,
         "model_version": "mock_xgb_v1",
-        "features_snapshot": {"amount": tx.amount, "category": tx.category}
+        "features_snapshot": {
+            "amount": tx.amount,
+            "category": tx.category,
+            "country": country,
+            "config_used": {
+                "sensitive_countries": config.get('sensitive_countries'),
+                "min_amount_alert": config.get('min_amount_alert')
+            }
+        }
     }
     pred_res = supabase.table("fraud_predictions").insert(pred_payload).execute()
     prediction_id = pred_res.data[0]['id']
 
-    # 4. Moteur de Règles & Décision
-    thresholds = get_config_thresholds()
-    
+    # 6. Moteur de Règles & Décision (utilise les seuils configurés)
     decision = "ALLOW"
     severity = "BASSE"
     create_alert = False
-    
-    if fraud_score >= thresholds['critical']:
+
+    if fraud_score >= config['fraud_threshold_critical']:
         decision = "BLOCK"
         severity = "CRITIQUE"
         create_alert = True
-    elif fraud_score >= thresholds['medium']:
-        decision = "REVIEW" # Demande de vérification (ex: 3DSecure)
+    elif fraud_score >= config['fraud_threshold_medium']:
+        decision = "REVIEW"  # Demande de vérification (ex: 3DSecure)
         severity = "MOYENNE"
         create_alert = True
     
@@ -226,6 +341,27 @@ async def get_dashboard_metrics():
         high_risk = 0
         medium_risk = 0
         low_risk = 0
+        
+        # Récupérer les alertes résolues (Fraude confirmée ou Faux positif)
+        resolved_alerts = supabase.table("alerts")\
+            .select("created_at, updated_at")\
+            .in_("status", ["RESOLU_FRAUDE", "FAUX_POSITIF"])\
+            .not_.is_("updated_at", "null")\
+            .execute()
+
+        data = resolved_alerts.data or []
+
+        if data:
+            total_seconds = 0
+            for a in data:
+                start = datetime.fromisoformat(a['created_at'].replace('Z', '+00:00'))
+                end = datetime.fromisoformat(a['updated_at'].replace('Z', '+00:00'))
+                total_seconds += (end - start).total_seconds()
+
+            # Convertir en minutes
+            avg_minutes = int((total_seconds / len(data)) / 60)
+        else:
+            avg_minutes = 0
 
         for alert in all_alerts.data or []:
             pred = alert.get("fraud_predictions")
@@ -245,7 +381,7 @@ async def get_dashboard_metrics():
             "alerts_24h": len(alerts_24h.data) if alerts_24h.data else 0,
             "fraud_rate": round(fraud_rate, 1),
             "in_progress": len(in_progress.data) if in_progress.data else 0,
-            "avg_analysis_time": 12,  # Valeur simulée, à calculer depuis les timestamps
+            "avg_analysis_time": avg_minutes, 
             "risk_distribution": {
                 "high": high_risk,
                 "medium": medium_risk,

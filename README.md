@@ -7,4 +7,8 @@ Un utilisateur doit:
 - [ ] Visualiser les alertes récentes en live
 - [ ] Voir les détails d'une alerte
 - [ ] Modifier les paramètres du logiciel
-- [ ] Marquer une nouvelle alerte comme "Fraude" ou "Faux positif"
+- [ ] Marquer une nouvelle alerte comme "Fraude" ou "Faux positif", ajouter des commentaires
+- [ ] Visualiser l'historique, les chiffres et les graphes
+
+TODO:
+- Fix the graphs so that they are accurate
