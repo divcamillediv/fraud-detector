@@ -46,7 +46,7 @@ type Filters = {
 
 // Type for transaction history (from full_history_view - flattened structure)
 type TransactionHistory = {
-  id: string;
+  transaction_id: string;
   created_at: string;
   amount: number;
   currency: string;
@@ -511,7 +511,7 @@ export default function Dashboard() {
       const clean = (val: any) => `"${String(val || '').replace(/"/g, '""')}"`;
 
       return [
-        clean(tx?.id),
+        clean(tx?.transaction_id),
         clean(new Date(item.created_at).toLocaleString('fr-FR')),
         clean(tx?.external_user_id),
         clean(tx?.amount),
@@ -1006,7 +1006,7 @@ export default function Dashboard() {
                           const country = tx.ip_address ? countryFromIP(tx.ip_address) : 'N/A';
 
                           return (
-                            <tr key={tx.id} className="hover:bg-slate-800/30 transition-colors">
+                            <tr key={tx.transaction_id} className="hover:bg-slate-800/30 transition-colors">
                               <td className="p-3 text-gray-300">
                                 {new Date(tx.created_at).toLocaleString('fr-FR', {
                                   day: '2-digit',
