@@ -9,3 +9,6 @@ Un utilisateur doit:
 - [ ] Modifier les paramètres du logiciel
 - [ ] Marquer une nouvelle alerte comme "Fraude" ou "Faux positif", ajouter des commentaires
 - [ ] Visualiser l'historique, les chiffres et les graphes
+
+TODO:
+- Fix the graphs so that they are accurate
