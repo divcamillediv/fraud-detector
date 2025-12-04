@@ -6,14 +6,15 @@ import uuid
 # --- CONFIGURATION DE LA DÉMO ---
 API_URL = "http://127.0.0.1:8000/analyze"
 DEMO_DURATION_MINUTES = 10  # Durée du script
-MIN_DELAY = 2  # Délai min entre 2 transactions (secondes)
-MAX_DELAY = 6  # Délai max (pour varier le rythme)
+MIN_DELAY = 1  # Délai min entre 2 transactions (secondes)
+MAX_DELAY = 4  # Délai max (pour varier le rythme)
 
 # --- PROFILS DE COMPORTEMENT ---
-# Ces profils sont calibrés pour déclencher vos règles backend (Mock XGBoost)
+# Ces profils sont calibrés pour déclencher les règles backend (Mock XGBoost)
+
 PROFILES = [
     {
-        "type": "✅ SAFE",
+        "type": "SAFE",
         "weight": 70, # 70% de chance
         "amount_range": (5.00, 150.00),
         "categories": ["Food", "Books", "Clothing", "Transport"],
@@ -21,15 +22,15 @@ PROFILES = [
         "color": "\033[92m" # Vert
     },
     {
-        "type": "⚠️ SUSPECT",
+        "type": "SUSPECT",
         "weight": 20, # 20% de chance (Score moyen)
         "amount_range": (800.00, 1900.00), # Montant élevé mais pas critique
         "categories": ["Travel", "Services", "Gambling"],
         "merchants": ["Air France", "BetClic", "Western Union"],
-        "color": "\033[93m" # Jaune/Orange
+        "color": "\033[93m" # Orange
     },
     {
-        "type": "🚨 FRAUD",
+        "type": "FRAUD",
         "weight": 10, # 10% de chance (Score critique)
         "amount_range": (2500.00, 9000.00), # > 2000 déclenche souvent l'alerte
         "categories": ["Electronics", "Jewelry"], # Catégories à risque
@@ -84,7 +85,7 @@ def run_demo():
             print(f"{profile['color']}[{profile['type']}] {merchant} ({category}) - {amount}€ -> Action: {action} (Score: {score:.2f})\033[0m")
 
         except Exception as e:
-            print(f"❌ Erreur de connexion : {e}")
+            print(f"Erreur de connexion : {e}")
 
         # 4. Pause aléatoire pour simuler le trafic naturel
         sleep_time = random.uniform(MIN_DELAY, MAX_DELAY)
