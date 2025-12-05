@@ -19,6 +19,7 @@ backend/lib64
 backend/pyvenv.cfg
 backend/.env
 backend/__pycache__/
+backend/venv/
 site.html
 
 # User-specific files (MonoDevelop/Xamarin Studio)

@@ -6,3 +6,4 @@ pandas
 xgboost
 pydantic
 python-dotenv
+faker
